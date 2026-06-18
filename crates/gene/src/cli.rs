@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use gene_core::chat::{build_wire, Mode};
 use gene_core::config::Config;
 use gene_core::dataset::{self, format::Format};
+use gene_core::eval;
 use gene_core::llm::StreamEvent;
 use gene_core::model::{Message, Role};
 use gene_core::provider::http_client;
@@ -579,6 +580,63 @@ pub async fn train(
     }
     if !ok {
         bail!("{message}");
+    }
+    Ok(())
+}
+
+pub async fn eval_run(
+    cfg: &Config,
+    set_path: &Path,
+    grader: &str,
+    concurrency: usize,
+    json: bool,
+) -> Result<()> {
+    ensure_provider_resolvable(cfg)?;
+    let set = eval::EvalSet::load(set_path)?;
+    let grader = eval::Grader::parse(grader)?;
+    let provider = cfg.chat_provider(http_client());
+    let model = cfg.chat_model();
+    let report = eval::run_eval(&set, &provider, &model, grader, concurrency).await;
+    let store = RunStore::new(cfg.runs_dir()?);
+    let run_id = eval::persist(&store, &report, grader).ok();
+
+    if json {
+        let mut obj = serde_json::to_value(&report)?;
+        if let Some(id) = &run_id {
+            obj["run_id"] = serde_json::Value::String(id.clone());
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!(
+            "eval '{}' on {} — {} items",
+            report.set, report.model, report.n
+        );
+        match report.mean_score {
+            Some(ms) => println!(
+                "score: {:.1}%  ({}/{} passed)",
+                ms * 100.0,
+                report.passed,
+                report.scored
+            ),
+            None => println!("score: (no graded items)"),
+        }
+        if let Some(id) = &run_id {
+            println!("run:   {id}");
+        }
+        for item in &report.items {
+            let mark = match item.passed {
+                Some(true) => "✓",
+                Some(false) => "✗",
+                None => "·",
+            };
+            let preview: String = item
+                .output
+                .chars()
+                .take(70)
+                .collect::<String>()
+                .replace('\n', " ");
+            println!("[{mark}] {:<14} {preview}", item.item_id);
+        }
     }
     Ok(())
 }

@@ -62,6 +62,11 @@ enum Cmd {
     },
     /// Run a fine-tune (LoRA/DoRA/full) and record it as a tracked run.
     Train(TrainArgs),
+    /// Evaluate the model against a prompt set.
+    Eval {
+        #[command(subcommand)]
+        cmd: EvalCmd,
+    },
     /// Report whether the chat + fine-tuning prerequisites are installed.
     Doctor,
 }
@@ -168,6 +173,25 @@ struct TrainArgs {
     dry_run: bool,
 }
 
+#[derive(Subcommand)]
+enum EvalCmd {
+    /// Run an eval set against the active provider and record an Eval run.
+    Run(EvalRunArgs),
+}
+
+#[derive(Args)]
+struct EvalRunArgs {
+    /// Eval-set JSON file.
+    #[arg(long)]
+    set: PathBuf,
+    /// Grader: none | exact | contains.
+    #[arg(long, default_value = "none")]
+    grader: String,
+    /// Maximum concurrent requests.
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     reset_sigpipe();
@@ -225,6 +249,9 @@ async fn main() -> Result<()> {
         Some(Cmd::Train(a)) => {
             cli::train(&cfg, a.method, a.iters, a.learning_rate, a.dry_run, json).await
         }
+        Some(Cmd::Eval { cmd }) => match cmd {
+            EvalCmd::Run(a) => cli::eval_run(&cfg, &a.set, &a.grader, a.concurrency, json).await,
+        },
         Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
         // No subcommand launches the desktop GUI (when this build includes it).
         None => launch_gui(cfg, cfg_path),

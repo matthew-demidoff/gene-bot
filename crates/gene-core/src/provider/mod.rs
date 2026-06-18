@@ -208,4 +208,29 @@ impl Provider {
             })
             .unwrap_or_default()
     }
+
+    /// Non-streaming completion: drive `request` to completion and return the
+    /// full answer text. Used by eval/batch, where the whole response is wanted
+    /// rather than a token feed. Command/`<think>` parsing is off.
+    pub async fn complete(&self, request: ChatRequest) -> anyhow::Result<String> {
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(1024);
+        let producer = self.chat_stream(request, false, tx);
+        let collect = async {
+            let mut answer = String::new();
+            let mut error = None;
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    StreamEvent::AnswerDelta(s) => answer.push_str(&s),
+                    StreamEvent::Error(e) => error = Some(e),
+                    _ => {}
+                }
+            }
+            (answer, error)
+        };
+        let (_, (answer, error)) = tokio::join!(producer, collect);
+        match error {
+            Some(e) => Err(anyhow::anyhow!(e)),
+            None => Ok(answer),
+        }
+    }
 }
