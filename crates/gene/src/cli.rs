@@ -13,7 +13,7 @@ use gene_core::dataset::{self, format::Format};
 use gene_core::eval;
 use gene_core::llm::StreamEvent;
 use gene_core::model::{Message, Role};
-use gene_core::provider::http_client;
+use gene_core::provider::{http_client, Provider};
 use gene_core::runs::{DatasetRef, RunStore};
 use gene_core::train::{self, TrainMsg};
 
@@ -584,10 +584,41 @@ pub async fn train(
     Ok(())
 }
 
+/// Resolve the judge provider: an explicit `--judge` profile, else `[roles].judge`.
+/// Falls back to self-judging with the chat provider when judging is needed but
+/// no explicit judge is set (so it works on any config, including legacy). A
+/// named `--judge`/`[roles].judge` that doesn't exist is still an error.
+fn resolve_judge(
+    cfg: &Config,
+    judge_name: Option<&str>,
+    needs_judge: bool,
+) -> Result<Option<(Provider, String)>> {
+    match judge_name.or(cfg.roles.judge.as_deref()) {
+        Some(name) => cfg
+            .named_provider(name, http_client())
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("judge provider '{name}' not found in [providers]")),
+        // Self-judge with the chat provider. Weaker than a separate judge model,
+        // but the convenient default; pass --judge for an independent judge.
+        None if needs_judge => Ok(Some((cfg.chat_provider(http_client()), cfg.chat_model()))),
+        None => Ok(None),
+    }
+}
+
+/// Whether any item (or the run-level grader) needs the LLM judge.
+fn needs_judge(set: &eval::EvalSet, grader: eval::Grader) -> bool {
+    grader == eval::Grader::Judge
+        || set
+            .items
+            .iter()
+            .any(|i| i.grader == Some(eval::Grader::Judge))
+}
+
 pub async fn eval_run(
     cfg: &Config,
     set_path: &Path,
     grader: &str,
+    judge_name: Option<String>,
     concurrency: usize,
     json: bool,
 ) -> Result<()> {
@@ -596,7 +627,12 @@ pub async fn eval_run(
     let grader = eval::Grader::parse(grader)?;
     let provider = cfg.chat_provider(http_client());
     let model = cfg.chat_model();
-    let report = eval::run_eval(&set, &provider, &model, grader, concurrency).await;
+    let judge_pm = resolve_judge(cfg, judge_name.as_deref(), needs_judge(&set, grader))?;
+    let judge = judge_pm.as_ref().map(|(p, m)| eval::Judge {
+        provider: p,
+        model: m.clone(),
+    });
+    let report = eval::run_eval(&set, &provider, &model, grader, judge.as_ref(), concurrency).await;
     let store = RunStore::new(cfg.runs_dir()?);
     let run_id = eval::persist(&store, &report, grader).ok();
 
@@ -620,14 +656,24 @@ pub async fn eval_run(
             ),
             None => println!("score: (no graded items)"),
         }
+        if report.errored > 0 {
+            println!(
+                "errored: {} item(s) — inference/judge errors, not failures",
+                report.errored
+            );
+        }
         if let Some(id) = &run_id {
             println!("run:   {id}");
         }
         for item in &report.items {
-            let mark = match item.passed {
-                Some(true) => "✓",
-                Some(false) => "✗",
-                None => "·",
+            let mark = if item.error {
+                "!"
+            } else {
+                match item.passed {
+                    Some(true) => "✓",
+                    Some(false) => "✗",
+                    None => "·",
+                }
             };
             let preview: String = item
                 .output
@@ -636,6 +682,98 @@ pub async fn eval_run(
                 .collect::<String>()
                 .replace('\n', " ");
             println!("[{mark}] {:<14} {preview}", item.item_id);
+        }
+    }
+    Ok(())
+}
+
+pub async fn eval_compare(
+    cfg: &Config,
+    set_path: &Path,
+    providers: &str,
+    grader: &str,
+    judge_name: Option<String>,
+    concurrency: usize,
+    json: bool,
+) -> Result<()> {
+    let set = eval::EvalSet::load(set_path)?;
+    let grader = eval::Grader::parse(grader)?;
+    if grader == eval::Grader::None && !set.items.iter().any(|i| i.grader.is_some()) {
+        bail!(
+            "eval compare needs a scoring grader (--grader exact|contains|judge) — \
+             'none' yields an empty score table"
+        );
+    }
+    let names: Vec<&str> = providers
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.len() < 2 {
+        bail!("eval compare needs at least two providers (--providers a,b)");
+    }
+    // Resolve every provider up front, so an unknown name errors before any run
+    // or persist (no partial side effects).
+    let mut resolved = Vec::new();
+    for name in &names {
+        let (provider, model) = cfg
+            .named_provider(name, http_client())
+            .ok_or_else(|| anyhow::anyhow!("provider '{name}' not found in [providers]"))?;
+        resolved.push((name.to_string(), provider, model));
+    }
+    let judge_pm = resolve_judge(cfg, judge_name.as_deref(), needs_judge(&set, grader))?;
+    let judge = judge_pm.as_ref().map(|(p, m)| eval::Judge {
+        provider: p,
+        model: m.clone(),
+    });
+
+    let store = RunStore::new(cfg.runs_dir()?);
+    let mut reports = Vec::new();
+    for (name, provider, model) in &resolved {
+        let report =
+            eval::run_eval(&set, provider, model, grader, judge.as_ref(), concurrency).await;
+        let run_id = eval::persist(&store, &report, grader).ok();
+        reports.push((name.clone(), report, run_id));
+    }
+
+    if json {
+        let results: Vec<_> = reports
+            .iter()
+            .map(|(name, r, run_id)| {
+                serde_json::json!({
+                    "provider": name,
+                    "model": r.model,
+                    "mean_score": r.mean_score,
+                    "passed": r.passed,
+                    "scored": r.scored,
+                    "errored": r.errored,
+                    "n": r.n,
+                    "run_id": run_id,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "set": set.name, "results": results })
+            )?
+        );
+    } else {
+        println!("compare '{}' across {} models:\n", set.name, reports.len());
+        for (name, r, _) in &reports {
+            let score = r
+                .mean_score
+                .map(|m| format!("{:.1}%", m * 100.0))
+                .unwrap_or_else(|| "—".to_string());
+            let errnote = if r.errored > 0 {
+                format!(", {} errored", r.errored)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {name:<16} {:<26} {score:>7}  ({}/{} passed of {}{errnote})",
+                r.model, r.passed, r.scored, r.n
+            );
         }
     }
     Ok(())

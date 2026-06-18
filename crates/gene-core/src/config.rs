@@ -462,6 +462,17 @@ impl Config {
         self.chat_profile().model
     }
 
+    /// Build a provider + its model id for a named `[providers]` profile, if it
+    /// exists. Used by eval compare / judge to select arbitrary backends.
+    pub fn named_provider(&self, name: &str, http: reqwest::Client) -> Option<(Provider, String)> {
+        self.providers.get(name).map(|p| {
+            (
+                Provider::new(p.kind, http, p.base_url.clone(), p.api_key.clone()),
+                p.model.clone(),
+            )
+        })
+    }
+
     /// Whether `roles.chat` names a provider that doesn't exist. The CLI can
     /// surface this as an error instead of silently falling back.
     pub fn chat_role_is_dangling(&self) -> bool {
