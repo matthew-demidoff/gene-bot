@@ -134,7 +134,7 @@ impl GuiApp {
             config_path,
             conv,
             mode: Mode::Assistant,
-            http: reqwest::Client::new(),
+            http: gene_core::provider::http_client(),
             rt,
             ctx: cc.egui_ctx.clone(),
             tx,
