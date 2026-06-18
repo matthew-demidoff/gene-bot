@@ -177,6 +177,8 @@ struct TrainArgs {
 enum EvalCmd {
     /// Run an eval set against the active provider and record an Eval run.
     Run(EvalRunArgs),
+    /// Run an eval set across several named providers and compare side by side.
+    Compare(EvalCompareArgs),
 }
 
 #[derive(Args)]
@@ -184,9 +186,31 @@ struct EvalRunArgs {
     /// Eval-set JSON file.
     #[arg(long)]
     set: PathBuf,
-    /// Grader: none | exact | contains.
+    /// Grader: none | exact | contains | judge.
     #[arg(long, default_value = "none")]
     grader: String,
+    /// Judge provider profile (for --grader judge); defaults to [roles].judge.
+    #[arg(long)]
+    judge: Option<String>,
+    /// Maximum concurrent requests.
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
+}
+
+#[derive(Args)]
+struct EvalCompareArgs {
+    /// Eval-set JSON file.
+    #[arg(long)]
+    set: PathBuf,
+    /// Comma-separated named provider profiles to compare (e.g. base,finetuned).
+    #[arg(long)]
+    providers: String,
+    /// Grader: none | exact | contains | judge.
+    #[arg(long, default_value = "none")]
+    grader: String,
+    /// Judge provider profile (for --grader judge); defaults to [roles].judge.
+    #[arg(long)]
+    judge: Option<String>,
     /// Maximum concurrent requests.
     #[arg(long, default_value_t = 4)]
     concurrency: usize,
@@ -250,7 +274,21 @@ async fn main() -> Result<()> {
             cli::train(&cfg, a.method, a.iters, a.learning_rate, a.dry_run, json).await
         }
         Some(Cmd::Eval { cmd }) => match cmd {
-            EvalCmd::Run(a) => cli::eval_run(&cfg, &a.set, &a.grader, a.concurrency, json).await,
+            EvalCmd::Run(a) => {
+                cli::eval_run(&cfg, &a.set, &a.grader, a.judge, a.concurrency, json).await
+            }
+            EvalCmd::Compare(a) => {
+                cli::eval_compare(
+                    &cfg,
+                    &a.set,
+                    &a.providers,
+                    &a.grader,
+                    a.judge,
+                    a.concurrency,
+                    json,
+                )
+                .await
+            }
         },
         Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
         // No subcommand launches the desktop GUI (when this build includes it).

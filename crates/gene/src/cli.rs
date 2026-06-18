@@ -13,7 +13,7 @@ use gene_core::dataset::{self, format::Format};
 use gene_core::eval;
 use gene_core::llm::StreamEvent;
 use gene_core::model::{Message, Role};
-use gene_core::provider::http_client;
+use gene_core::provider::{http_client, Provider};
 use gene_core::runs::{DatasetRef, RunStore};
 use gene_core::train::{self, TrainMsg};
 
@@ -584,10 +584,32 @@ pub async fn train(
     Ok(())
 }
 
+/// Resolve the judge provider: an explicit `--judge` profile, else `[roles].judge`.
+/// Errors if the grader is `judge` but none is configured, or a named one is missing.
+fn resolve_judge(
+    cfg: &Config,
+    judge_name: Option<&str>,
+    grader: eval::Grader,
+) -> Result<Option<(Provider, String)>> {
+    match judge_name.or(cfg.roles.judge.as_deref()) {
+        Some(name) => cfg
+            .named_provider(name, http_client())
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("judge provider '{name}' not found in [providers]")),
+        None => {
+            if grader == eval::Grader::Judge {
+                bail!("grader 'judge' requires --judge <profile> or [roles].judge in the config");
+            }
+            Ok(None)
+        }
+    }
+}
+
 pub async fn eval_run(
     cfg: &Config,
     set_path: &Path,
     grader: &str,
+    judge_name: Option<String>,
     concurrency: usize,
     json: bool,
 ) -> Result<()> {
@@ -596,7 +618,12 @@ pub async fn eval_run(
     let grader = eval::Grader::parse(grader)?;
     let provider = cfg.chat_provider(http_client());
     let model = cfg.chat_model();
-    let report = eval::run_eval(&set, &provider, &model, grader, concurrency).await;
+    let judge_pm = resolve_judge(cfg, judge_name.as_deref(), grader)?;
+    let judge = judge_pm.as_ref().map(|(p, m)| eval::Judge {
+        provider: p,
+        model: m.clone(),
+    });
+    let report = eval::run_eval(&set, &provider, &model, grader, judge.as_ref(), concurrency).await;
     let store = RunStore::new(cfg.runs_dir()?);
     let run_id = eval::persist(&store, &report, grader).ok();
 
@@ -636,6 +663,79 @@ pub async fn eval_run(
                 .collect::<String>()
                 .replace('\n', " ");
             println!("[{mark}] {:<14} {preview}", item.item_id);
+        }
+    }
+    Ok(())
+}
+
+pub async fn eval_compare(
+    cfg: &Config,
+    set_path: &Path,
+    providers: &str,
+    grader: &str,
+    judge_name: Option<String>,
+    concurrency: usize,
+    json: bool,
+) -> Result<()> {
+    let set = eval::EvalSet::load(set_path)?;
+    let grader = eval::Grader::parse(grader)?;
+    let names: Vec<&str> = providers
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.len() < 2 {
+        bail!("eval compare needs at least two providers (--providers a,b)");
+    }
+    let judge_pm = resolve_judge(cfg, judge_name.as_deref(), grader)?;
+    let judge = judge_pm.as_ref().map(|(p, m)| eval::Judge {
+        provider: p,
+        model: m.clone(),
+    });
+
+    let store = RunStore::new(cfg.runs_dir()?);
+    let mut reports = Vec::new();
+    for name in &names {
+        let (provider, model) = cfg
+            .named_provider(name, http_client())
+            .ok_or_else(|| anyhow::anyhow!("provider '{name}' not found in [providers]"))?;
+        let report =
+            eval::run_eval(&set, &provider, &model, grader, judge.as_ref(), concurrency).await;
+        let _ = eval::persist(&store, &report, grader);
+        reports.push((name.to_string(), report));
+    }
+
+    if json {
+        let results: Vec<_> = reports
+            .iter()
+            .map(|(name, r)| {
+                serde_json::json!({
+                    "provider": name,
+                    "model": r.model,
+                    "mean_score": r.mean_score,
+                    "passed": r.passed,
+                    "scored": r.scored,
+                    "n": r.n,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "set": set.name, "results": results })
+            )?
+        );
+    } else {
+        println!("compare '{}' across {} models:\n", set.name, reports.len());
+        for (name, r) in &reports {
+            let score = r
+                .mean_score
+                .map(|m| format!("{:.1}%", m * 100.0))
+                .unwrap_or_else(|| "—".to_string());
+            println!(
+                "  {name:<16} {:<26} {score:>7}  ({}/{} passed of {})",
+                r.model, r.passed, r.scored, r.n
+            );
         }
     }
     Ok(())

@@ -28,6 +28,9 @@ pub enum Grader {
     Exact,
     /// Output must contain the reference (trimmed).
     Contains,
+    /// An LLM judge scores the answer PASS/FAIL (uses a judge provider). Works
+    /// for open-ended items with no exact reference.
+    Judge,
 }
 
 impl Grader {
@@ -36,9 +39,16 @@ impl Grader {
             "none" => Ok(Grader::None),
             "exact" => Ok(Grader::Exact),
             "contains" => Ok(Grader::Contains),
-            other => anyhow::bail!("unknown grader '{other}' (none | exact | contains)"),
+            "judge" => Ok(Grader::Judge),
+            other => anyhow::bail!("unknown grader '{other}' (none | exact | contains | judge)"),
         }
     }
+}
+
+/// A configured LLM judge: the provider and model used to score answers.
+pub struct Judge<'a> {
+    pub provider: &'a Provider,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +109,8 @@ fn grade(grader: Grader, item: &EvalItem, output: &str) -> Option<bool> {
         Grader::None => None,
         Grader::Exact => Some(output.trim() == reference.trim()),
         Grader::Contains => Some(output.contains(reference.trim())),
+        // Judge is async and handled in run_eval; never reaches the sync path.
+        Grader::Judge => None,
     }
 }
 
@@ -119,6 +131,47 @@ fn messages(system: &Option<String>, prompt: &str) -> Vec<WireMessage> {
     out
 }
 
+/// Whether a judge's reply is a PASS. The judge is asked for one word; FAIL wins
+/// if both somehow appear.
+fn parse_verdict(text: &str) -> bool {
+    let upper = text.to_uppercase();
+    if upper.contains("FAIL") {
+        false
+    } else {
+        upper.contains("PASS")
+    }
+}
+
+/// Score an answer with the LLM judge — uses the item's `reference` as criteria
+/// when present, else asks for a general correctness judgement (so open-ended
+/// items with no exact reference are still gradable).
+async fn judge_grade(judge: &Judge<'_>, item: &EvalItem, output: &str) -> Option<bool> {
+    let criteria = item
+        .reference
+        .as_deref()
+        .unwrap_or("answer the question correctly and helpfully");
+    let prompt = format!(
+        "You are grading a model's answer. Reply with exactly one word: PASS or FAIL.\n\n\
+         Question:\n{}\n\nExpected answer or criteria:\n{}\n\nCandidate answer:\n{}\n\n\
+         Does the candidate answer satisfy the criteria? Reply PASS or FAIL.",
+        item.prompt, criteria, output
+    );
+    let request = ChatRequest {
+        model: judge.model.clone(),
+        messages: vec![WireMessage {
+            role: "user".into(),
+            content: prompt,
+        }],
+        stream: true,
+        sampling: Sampling {
+            temperature: Some(0.0),
+            ..Default::default()
+        },
+    };
+    let verdict = judge.provider.complete(request).await.ok()?;
+    Some(parse_verdict(&verdict))
+}
+
 /// Run the eval set through `provider`/`model`, grading with `grader` (per-item
 /// graders win). Inference fans out up to `concurrency` requests at a time.
 pub async fn run_eval(
@@ -126,6 +179,7 @@ pub async fn run_eval(
     provider: &Provider,
     model: &str,
     grader: Grader,
+    judge: Option<&Judge<'_>>,
     concurrency: usize,
 ) -> EvalReport {
     use futures_util::stream::{self, StreamExt};
@@ -149,7 +203,14 @@ pub async fn run_eval(
                     .complete(request)
                     .await
                     .unwrap_or_else(|e| format!("[error: {e}]"));
-                let passed = grade(item.grader.unwrap_or(grader), item, &output);
+                let effective = item.grader.unwrap_or(grader);
+                let passed = match effective {
+                    Grader::Judge => match judge {
+                        Some(j) => judge_grade(j, item, &output).await,
+                        None => None,
+                    },
+                    other => grade(other, item, &output),
+                };
                 EvalResult {
                     item_id: item.id.clone(),
                     output,
@@ -244,5 +305,14 @@ mod tests {
         assert_eq!(set.items.len(), 1);
         assert_eq!(set.items[0].reference.as_deref(), Some("yo"));
         assert_eq!(set.temperature, 0.0);
+    }
+
+    #[test]
+    fn judge_verdict_parsing() {
+        assert!(parse_verdict("PASS"));
+        assert!(parse_verdict("pass — the answer is correct"));
+        assert!(!parse_verdict("FAIL"));
+        assert!(!parse_verdict("This should FAIL because ..."));
+        assert!(!parse_verdict("unclear")); // neither word -> not a pass
     }
 }
