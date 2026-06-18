@@ -4,20 +4,24 @@
 //!
 //! Every command is a configurable template, so the trainer/backend is pluggable.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
 use crate::model::dataset::TrainingExample;
+use crate::runs::{DatasetRef, Metric, RunKind, RunStatus, RunStore};
 
 /// Progress and completion messages from the fine-tune pipeline.
 pub enum TrainMsg {
     Log(String),
+    Metric(Metric),
     Done {
         ok: bool,
         message: String,
@@ -26,15 +30,68 @@ pub enum TrainMsg {
     },
 }
 
-/// Spawn the whole pipeline. Progress and completion arrive as `TrainMsg`.
+/// Spawn the whole pipeline. Progress and completion arrive as `TrainMsg`; the
+/// run is recorded in `runs_dir` (best-effort — tracking failures never abort
+/// the training itself).
 pub fn start_training(
     cfg: Config,
     work_dir: PathBuf,
     dataset_path: PathBuf,
+    runs_dir: PathBuf,
     tx: UnboundedSender<TrainMsg>,
 ) {
     tokio::spawn(async move {
-        let result = run_pipeline(&cfg, &work_dir, &dataset_path, &tx).await;
+        let store = RunStore::new(runs_dir);
+        let hyperparams = serde_json::json!({
+            "method": "lora",
+            "iters": cfg.finetune.iters,
+            "batch": cfg.finetune.batch,
+            "layers": cfg.finetune.layers,
+            "learning_rate": cfg.finetune.learning_rate,
+            "valid_fraction": cfg.finetune.valid_fraction,
+            "deploy_mode": cfg.finetune.deploy_mode,
+        });
+        let dataset = DatasetRef::from_dataset(&dataset_path).ok();
+        let run = store.create(
+            RunKind::Train,
+            cfg.finetune.mlx_base.clone(),
+            hyperparams,
+            dataset,
+        );
+        let run_id = match &run {
+            Ok(r) => {
+                log(&tx, format!("run {}", r.id));
+                Some(r.id.clone())
+            }
+            Err(e) => {
+                log(&tx, format!("run tracking unavailable: {e}"));
+                None
+            }
+        };
+
+        let result = run_pipeline(
+            &cfg,
+            &work_dir,
+            &dataset_path,
+            &store,
+            run_id.as_deref(),
+            &tx,
+        )
+        .await;
+
+        if let Ok(mut r) = run {
+            r.summary = summarize(&store.metrics(&r.id));
+            r.finished_at = Some(Utc::now());
+            r.status = match &result {
+                Ok(_) => RunStatus::Succeeded,
+                Err(e) => {
+                    r.error = Some(e.to_string());
+                    RunStatus::Failed
+                }
+            };
+            let _ = store.save(&r);
+        }
+
         let done = match result {
             Ok((new_base_url, new_model)) => TrainMsg::Done {
                 ok: true,
@@ -57,6 +114,8 @@ async fn run_pipeline(
     cfg: &Config,
     work_dir: &Path,
     dataset_path: &Path,
+    store: &RunStore,
+    run_id: Option<&str>,
     tx: &UnboundedSender<TrainMsg>,
 ) -> Result<(Option<String>, Option<String>)> {
     let examples = read_examples(dataset_path)?;
@@ -78,10 +137,24 @@ async fn run_pipeline(
 
     let vars = template_vars(cfg, &data_dir, &adapters_dir, &fused_dir, work_dir);
 
-    run_cmd("train", &fill(&cfg.finetune.train_command, &vars), tx).await?;
-    run_cmd("fuse", &fill(&cfg.finetune.fuse_command, &vars), tx).await?;
+    run_cmd(
+        "train",
+        &fill(&cfg.finetune.train_command, &vars),
+        store,
+        run_id,
+        tx,
+    )
+    .await?;
+    run_cmd(
+        "fuse",
+        &fill(&cfg.finetune.fuse_command, &vars),
+        store,
+        run_id,
+        tx,
+    )
+    .await?;
 
-    deploy(cfg, &fused_dir, work_dir, &vars, tx).await
+    deploy(cfg, &fused_dir, work_dir, &vars, store, run_id, tx).await
 }
 
 fn read_examples(path: &Path) -> Result<Vec<TrainingExample>> {
@@ -157,6 +230,8 @@ async fn deploy(
     fused_dir: &Path,
     work_dir: &Path,
     vars: &[(&str, String)],
+    store: &RunStore,
+    run_id: Option<&str>,
     tx: &UnboundedSender<TrainMsg>,
 ) -> Result<(Option<String>, Option<String>)> {
     match cfg.finetune.deploy_mode.as_str() {
@@ -188,6 +263,8 @@ async fn deploy(
             run_cmd(
                 "convert-gguf",
                 &fill(&cfg.finetune.gguf_convert_command, vars),
+                store,
+                run_id,
                 tx,
             )
             .await?;
@@ -206,6 +283,8 @@ async fn deploy(
             run_cmd(
                 "ollama-create",
                 &fill(&cfg.finetune.ollama_create_command, &create_vars),
+                store,
+                run_id,
                 tx,
             )
             .await?;
@@ -221,7 +300,13 @@ const ERR_TAIL_LINES: usize = 40;
 
 /// Run a subprocess, streaming stdout as progress logs; on failure include the
 /// tail of stderr in the error.
-async fn run_cmd(label: &str, command: &str, tx: &UnboundedSender<TrainMsg>) -> Result<()> {
+async fn run_cmd(
+    label: &str,
+    command: &str,
+    store: &RunStore,
+    run_id: Option<&str>,
+    tx: &UnboundedSender<TrainMsg>,
+) -> Result<()> {
     log(tx, format!("{label}: starting"));
     let parts = shell_words::split(command).map_err(|e| anyhow!("bad {label} command: {e}"))?;
     if parts.is_empty() {
@@ -241,10 +326,27 @@ async fn run_cmd(label: &str, command: &str, tx: &UnboundedSender<TrainMsg>) -> 
 
     let tx_out = tx.clone();
     let label_out = label.to_string();
+    let store_out = store.clone();
+    let run_out = run_id.map(str::to_string);
     let out_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let _ = tx_out.send(TrainMsg::Log(format!("{label_out}: {line}")));
+            if let Some((step, fields)) = parse_mlx_metric(&line) {
+                let metric = Metric {
+                    step,
+                    at: Utc::now(),
+                    fields,
+                };
+                if let Some(id) = &run_out {
+                    let _ = store_out.append_metric(id, &metric);
+                }
+                let _ = tx_out.send(TrainMsg::Metric(metric));
+            }
+            let text = format!("{label_out}: {line}");
+            if let Some(id) = &run_out {
+                let _ = store_out.append_log(id, &text);
+            }
+            let _ = tx_out.send(TrainMsg::Log(text));
         }
     });
 
@@ -268,4 +370,117 @@ async fn run_cmd(label: &str, command: &str, tx: &UnboundedSender<TrainMsg>) -> 
 
 fn log(tx: &UnboundedSender<TrainMsg>, msg: String) {
     let _ = tx.send(TrainMsg::Log(msg));
+}
+
+/// Parse an `mlx_lm.lora` progress line such as
+/// `Iter 10: Train loss 2.413, Learning Rate 1.000e-05, Tokens/sec 213.5` or
+/// `Iter 200: Val loss 1.890` into `(iteration, fields)`. Lenient: returns
+/// `None` for any line without a recognizable iteration and metric.
+fn parse_mlx_metric(line: &str) -> Option<(u64, BTreeMap<String, f64>)> {
+    let step = number_after(line, "Iter ")? as u64;
+    let mut fields = BTreeMap::new();
+    for (key, name) in [
+        ("Train loss", "train_loss"),
+        ("Val loss", "val_loss"),
+        ("Learning Rate", "learning_rate"),
+        ("Tokens/sec", "tokens_per_sec"),
+    ] {
+        if let Some(value) = number_after(line, key) {
+            fields.insert(name.to_string(), value);
+        }
+    }
+    if fields.is_empty() {
+        None
+    } else {
+        Some((step, fields))
+    }
+}
+
+/// The first number after `key` in `line`, tolerating a trailing comma/unit and
+/// scientific notation (e.g. `1.000e-05,`).
+fn number_after(line: &str, key: &str) -> Option<f64> {
+    let token = line.split(key).nth(1)?.split_whitespace().next()?;
+    let token = token.trim_end_matches(|c: char| {
+        !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+    });
+    token.parse().ok()
+}
+
+/// Reduce a metric series to the headline numbers stored on the run record.
+fn summarize(metrics: &[Metric]) -> BTreeMap<String, f64> {
+    let mut summary = BTreeMap::new();
+    if let Some(train) = metrics
+        .iter()
+        .rev()
+        .find_map(|m| m.fields.get("train_loss"))
+    {
+        summary.insert("final_train_loss".into(), *train);
+    }
+    let val: Vec<f64> = metrics
+        .iter()
+        .filter_map(|m| m.fields.get("val_loss").copied())
+        .collect();
+    if let Some(&last) = val.last() {
+        summary.insert("final_val_loss".into(), last);
+    }
+    if let Some(min) = val.iter().copied().reduce(f64::min) {
+        summary.insert("min_val_loss".into(), min);
+    }
+    summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(actual: Option<&f64>, expected: f64) -> bool {
+        actual.is_some_and(|v| (v - expected).abs() < 1e-9)
+    }
+
+    #[test]
+    fn parses_train_loss_line() {
+        let (step, fields) = parse_mlx_metric(
+            "Iter 10: Train loss 2.413, Learning Rate 1.000e-05, Tokens/sec 213.5",
+        )
+        .unwrap();
+        assert_eq!(step, 10);
+        assert!(approx(fields.get("train_loss"), 2.413));
+        assert!(approx(fields.get("learning_rate"), 1.0e-5));
+        assert!(approx(fields.get("tokens_per_sec"), 213.5));
+        assert!(!fields.contains_key("val_loss"));
+    }
+
+    #[test]
+    fn parses_val_loss_line() {
+        let (step, fields) = parse_mlx_metric("Iter 200: Val loss 1.890, Val took 3.1s").unwrap();
+        assert_eq!(step, 200);
+        assert!(approx(fields.get("val_loss"), 1.890));
+        assert!(!fields.contains_key("train_loss"));
+    }
+
+    #[test]
+    fn ignores_lines_without_metrics() {
+        assert!(parse_mlx_metric("Loading pretrained model").is_none());
+        assert!(parse_mlx_metric("train: starting").is_none());
+        assert!(parse_mlx_metric("Iter 5: nothing useful here").is_none());
+    }
+
+    #[test]
+    fn summarizes_series() {
+        let point = |step, key: &str, value: f64| Metric {
+            step,
+            at: Utc::now(),
+            fields: BTreeMap::from([(key.to_string(), value)]),
+        };
+        let series = vec![
+            point(10, "train_loss", 2.5),
+            point(20, "val_loss", 2.0),
+            point(30, "train_loss", 1.8),
+            point(40, "val_loss", 2.3),
+        ];
+        let summary = summarize(&series);
+        assert!(approx(summary.get("final_train_loss"), 1.8));
+        assert!(approx(summary.get("final_val_loss"), 2.3));
+        assert!(approx(summary.get("min_val_loss"), 2.0));
+    }
 }
