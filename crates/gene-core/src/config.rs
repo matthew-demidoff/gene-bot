@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -304,6 +304,21 @@ impl Finetune {
     pub fn needs_fuse(&self) -> bool {
         self.method != "full"
     }
+
+    /// Error if the method can't take effect: a pre-0.2 config whose
+    /// `train_command` hardcodes `--fine-tune-type` would skip fuse (for "full")
+    /// yet still train LoRA. Shared by every training entry point so both the
+    /// CLI and the GUI are protected.
+    pub fn check_method(&self) -> Result<()> {
+        if self.method != "lora" && !self.train_command.contains("{fine_tune_type}") {
+            bail!(
+                "the configured train_command hardcodes --fine-tune-type and won't honor \
+                 method '{}' — add the {{fine_tune_type}} placeholder (see the default config)",
+                self.method
+            );
+        }
+        Ok(())
+    }
 }
 
 fn default_system_prompt() -> String {
@@ -529,5 +544,27 @@ mod tests {
         };
         assert!(dangling.chat_role_is_dangling());
         assert!(!Config::default().chat_role_is_dangling());
+    }
+
+    #[test]
+    fn check_method_guards_hardcoded_template() {
+        // full + a hardcoded --fine-tune-type template → refused
+        let hardcoded = Finetune {
+            method: "full".into(),
+            train_command: "mlx_lm.lora --fine-tune-type lora --iters {iters}".into(),
+            ..Default::default()
+        };
+        assert!(hardcoded.check_method().is_err());
+
+        // full + a templated train_command → allowed
+        let templated = Finetune {
+            method: "full".into(),
+            train_command: "mlx_lm.lora --fine-tune-type {fine_tune_type}".into(),
+            ..Default::default()
+        };
+        assert!(templated.check_method().is_ok());
+
+        // lora is always fine (matches any legacy template)
+        assert!(Finetune::default().check_method().is_ok());
     }
 }

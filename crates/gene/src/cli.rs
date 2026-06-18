@@ -486,16 +486,8 @@ pub async fn train(
     if let Some(lr) = learning_rate {
         cfg.finetune.learning_rate = lr;
     }
-    // A pre-0.2 config hardcodes --fine-tune-type in its train_command, so a
-    // non-LoRA method would skip fuse yet still train LoRA — refuse rather than
-    // silently do the wrong thing.
-    if cfg.finetune.method != "lora" && !cfg.finetune.train_command.contains("{fine_tune_type}") {
-        bail!(
-            "the configured train_command hardcodes --fine-tune-type and won't honor \
-             method '{}' — add the {{fine_tune_type}} placeholder (see the default config)",
-            cfg.finetune.method
-        );
-    }
+    // Shared guard (also enforced in the engine, so the GUI path is covered too).
+    cfg.finetune.check_method()?;
     let work_dir = cfg.work_dir()?;
 
     if dry_run {
@@ -530,6 +522,8 @@ pub async fn train(
 
     let mut ok = false;
     let mut message = String::new();
+    let mut served_url: Option<String> = None;
+    let mut served_model: Option<String> = None;
     while let Some(msg) = rx.recv().await {
         match msg {
             // Progress goes to stderr so stdout carries only the final result.
@@ -552,10 +546,13 @@ pub async fn train(
             TrainMsg::Done {
                 ok: done_ok,
                 message: msg,
-                ..
+                new_base_url,
+                new_model,
             } => {
                 ok = done_ok;
                 message = msg;
+                served_url = new_base_url;
+                served_model = new_model;
                 break;
             }
         }
@@ -564,10 +561,21 @@ pub async fn train(
     if json {
         println!(
             "{}",
-            serde_json::to_string(&serde_json::json!({ "ok": ok, "message": message }))?
+            serde_json::to_string(&serde_json::json!({
+                "ok": ok,
+                "message": message,
+                "served_url": served_url,
+                "served_model": served_model,
+            }))?
         );
     } else {
         println!("{message}");
+        if let Some(url) = &served_url {
+            println!("serving at {url}");
+        }
+        if let Some(model) = &served_model {
+            println!("model: {model}");
+        }
     }
     if !ok {
         bail!("{message}");

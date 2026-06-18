@@ -43,7 +43,7 @@ pub fn start_training(
     tokio::spawn(async move {
         let store = RunStore::new(runs_dir);
         let hyperparams = serde_json::json!({
-            "method": "lora",
+            "method": cfg.finetune.method,
             "iters": cfg.finetune.iters,
             "batch": cfg.finetune.batch,
             "layers": cfg.finetune.layers,
@@ -118,6 +118,8 @@ async fn run_pipeline(
     run_id: Option<&str>,
     tx: &UnboundedSender<TrainMsg>,
 ) -> Result<(Option<String>, Option<String>)> {
+    // Shared guard: protects the GUI path too (the CLI also checks up front).
+    cfg.finetune.check_method()?;
     let examples = dataset::load(dataset_path)?;
     if examples.len() < cfg.finetune.min_examples {
         bail!(
@@ -177,7 +179,13 @@ pub fn planned_commands(cfg: &Config, work_dir: &Path) -> Vec<(String, String)> 
     } else {
         adapters_dir.clone()
     };
-    let vars = template_vars(cfg, &data_dir, &adapters_dir, &model_dir, work_dir);
+    let mut vars = template_vars(cfg, &data_dir, &adapters_dir, &model_dir, work_dir);
+    // deploy() injects {modelfile} at deploy time; mirror it so the ollama_gguf
+    // preview isn't left with an unfilled placeholder.
+    vars.push((
+        "modelfile",
+        work_dir.join("Modelfile").display().to_string(),
+    ));
 
     let mut cmds = vec![(
         "train".to_string(),
