@@ -3,16 +3,17 @@
 //! `--json` mode for machine-readable output.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use gene_core::chat::{build_wire, Mode};
 use gene_core::config::Config;
+use gene_core::dataset::{self, format::Format};
 use gene_core::llm::StreamEvent;
 use gene_core::model::{Message, Role};
 use gene_core::provider::http_client;
-use gene_core::runs::RunStore;
+use gene_core::runs::{DatasetRef, RunStore};
 
 fn parse_mode(s: &str) -> Result<Mode> {
     match s {
@@ -281,6 +282,184 @@ pub async fn doctor(cfg: &Config, json: bool) -> Result<()> {
     }
     if !report.all_ok() {
         bail!("some prerequisite checks failed");
+    }
+    Ok(())
+}
+
+/// Resolve the dataset file: an explicit `--file`, else the configured path.
+fn dataset_file(cfg: &Config, file: Option<PathBuf>) -> Result<PathBuf> {
+    match file {
+        Some(f) => Ok(f),
+        None => cfg.dataset_path(),
+    }
+}
+
+pub fn dataset_stats(cfg: &Config, file: Option<PathBuf>, json: bool) -> Result<()> {
+    let path = dataset_file(cfg, file)?;
+    let examples = dataset::load(&path)?;
+    let s = dataset::stats(&examples);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": path.display().to_string(),
+                "total": s.total,
+                "edited": s.edited,
+                "conversations": s.conversations,
+                "by_source": s.by_source,
+            }))?
+        );
+    } else {
+        println!("path:          {}", path.display());
+        println!("total:         {}", s.total);
+        println!("edited:        {}", s.edited);
+        println!("conversations: {}", s.conversations);
+        let sources = s
+            .by_source
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        println!("sources:       {sources}");
+    }
+    Ok(())
+}
+
+pub fn dataset_dedup(cfg: &Config, file: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> {
+    let path = dataset_file(cfg, file)?;
+    let mut examples = dataset::load(&path)?;
+    let removed = dataset::dedup(&mut examples);
+    if !dry_run && removed > 0 {
+        dataset::save(&path, &examples)?;
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "removed": removed,
+                "remaining": examples.len(),
+                "written": !dry_run && removed > 0,
+            }))?
+        );
+    } else if dry_run {
+        println!(
+            "{removed} duplicate(s) would be removed, {} remaining (dry run)",
+            examples.len()
+        );
+    } else {
+        println!(
+            "removed {removed} duplicate(s), {} remaining",
+            examples.len()
+        );
+    }
+    Ok(())
+}
+
+pub fn dataset_import(
+    cfg: &Config,
+    file: Option<PathBuf>,
+    from: &Path,
+    format: &str,
+    replace: bool,
+    json: bool,
+) -> Result<()> {
+    let path = dataset_file(cfg, file)?;
+    let fmt = Format::parse(format)?;
+    let text =
+        std::fs::read_to_string(from).with_context(|| format!("reading {}", from.display()))?;
+    let mut incoming = dataset::format::import(&text, fmt)?;
+    let added = incoming.len();
+    if replace && incoming.is_empty() {
+        bail!(
+            "refusing to replace the dataset with an empty import from {}",
+            from.display()
+        );
+    }
+    let mut examples = if replace {
+        Vec::new()
+    } else if path.exists() {
+        // Distinguish "no dataset yet" (fine for a first import) from a real
+        // read/parse error, which must abort rather than silently discard data.
+        dataset::load(&path)?
+    } else {
+        Vec::new()
+    };
+    examples.append(&mut incoming);
+    dataset::save(&path, &examples)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "imported": added,
+                "total": examples.len(),
+                "replaced": replace,
+                "path": path.display().to_string(),
+            }))?
+        );
+    } else {
+        let verb = if replace { "replaced with" } else { "appended" };
+        println!(
+            "{verb} {added} example(s); dataset now has {}",
+            examples.len()
+        );
+    }
+    Ok(())
+}
+
+pub fn dataset_export(
+    cfg: &Config,
+    file: Option<PathBuf>,
+    to: &Path,
+    format: &str,
+    json: bool,
+) -> Result<()> {
+    let path = dataset_file(cfg, file)?;
+    let fmt = Format::parse(format)?;
+    let examples = dataset::load(&path)?;
+    let text = dataset::format::export(&examples, fmt)?;
+    std::fs::write(to, text).with_context(|| format!("writing {}", to.display()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "exported": examples.len(),
+                "to": to.display().to_string(),
+                "format": format,
+            }))?
+        );
+    } else {
+        println!("exported {} example(s) to {}", examples.len(), to.display());
+    }
+    Ok(())
+}
+
+pub fn dataset_snapshot(cfg: &Config, file: Option<PathBuf>, json: bool) -> Result<()> {
+    let path = dataset_file(cfg, file)?;
+    // Content-addressed: identical datasets snapshot to the same file.
+    let dref = DatasetRef::from_dataset(&path)?;
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("snapshots");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let dest = dir.join(format!("{}.jsonl", dref.content_hash));
+    std::fs::copy(&path, &dest).with_context(|| format!("writing {}", dest.display()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "snapshot": dest.display().to_string(),
+                "content_hash": dref.content_hash,
+                "examples": dref.n_examples,
+            }))?
+        );
+    } else {
+        println!(
+            "snapshot {} ({} examples) -> {}",
+            dref.content_hash,
+            dref.n_examples,
+            dest.display()
+        );
     }
     Ok(())
 }

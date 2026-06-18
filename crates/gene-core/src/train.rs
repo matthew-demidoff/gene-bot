@@ -15,7 +15,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
-use crate::model::dataset::TrainingExample;
+use crate::dataset::{self, SplitSpec, SplitStrategy, TrainingExample};
 use crate::runs::{DatasetRef, Metric, RunKind, RunStatus, RunStore};
 
 /// Progress and completion messages from the fine-tune pipeline.
@@ -118,7 +118,7 @@ async fn run_pipeline(
     run_id: Option<&str>,
     tx: &UnboundedSender<TrainMsg>,
 ) -> Result<(Option<String>, Option<String>)> {
-    let examples = read_examples(dataset_path)?;
+    let examples = dataset::load(dataset_path)?;
     if examples.len() < cfg.finetune.min_examples {
         bail!(
             "need at least {} examples, have {} — edit more replies first",
@@ -157,30 +157,32 @@ async fn run_pipeline(
     deploy(cfg, &fused_dir, work_dir, &vars, store, run_id, tx).await
 }
 
-fn read_examples(path: &Path) -> Result<Vec<TrainingExample>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading dataset {}", path.display()))?;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(ex) = serde_json::from_str::<TrainingExample>(line) {
-            out.push(ex);
-        }
-    }
-    Ok(out)
-}
-
 /// Write `train.jsonl` / `valid.jsonl` in MLX chat format (messages only).
+///
+/// Splits by conversation so no conversation's examples straddle the train/valid
+/// boundary (the old tail-slice could leak). Falls back to a plain tail hold-out
+/// for degenerate datasets (e.g. a single conversation) so neither side is empty.
 fn write_split(examples: &[TrainingExample], data_dir: &Path, valid_fraction: f64) -> Result<()> {
-    let n = examples.len();
-    let mut valid_n = ((n as f64) * valid_fraction).round() as usize;
-    valid_n = valid_n.clamp(1, n.saturating_sub(1).max(1));
-    let split = n - valid_n;
+    let spec = SplitSpec {
+        strategy: SplitStrategy::ByConversation { seed: 0 },
+        valid: valid_fraction,
+        test: 0.0,
+    };
+    let split = dataset::make_split(examples, &spec);
+    let (mut train_idx, mut valid_idx) = (split.train, split.valid);
 
-    write_jsonl(&data_dir.join("train.jsonl"), &examples[..split])?;
-    write_jsonl(&data_dir.join("valid.jsonl"), &examples[split..])?;
+    let n = examples.len();
+    if n > 1 && (train_idx.is_empty() || valid_idx.is_empty()) {
+        let valid_n = (((n as f64) * valid_fraction).round() as usize).clamp(1, n - 1);
+        train_idx = (0..n - valid_n).collect();
+        valid_idx = (n - valid_n..n).collect();
+    }
+
+    let pick = |idxs: &[usize]| -> Vec<TrainingExample> {
+        idxs.iter().map(|&i| examples[i].clone()).collect()
+    };
+    write_jsonl(&data_dir.join("train.jsonl"), &pick(&train_idx))?;
+    write_jsonl(&data_dir.join("valid.jsonl"), &pick(&valid_idx))?;
     Ok(())
 }
 
@@ -494,5 +496,62 @@ mod tests {
         assert!(approx(summary.get("final_train_loss"), 1.8));
         assert!(approx(summary.get("final_val_loss"), 2.3));
         assert!(approx(summary.get("min_val_loss"), 2.0));
+    }
+
+    fn sft(conversation: &str, content: &str) -> TrainingExample {
+        use crate::dataset::{ChatMsg, Meta};
+        TrainingExample {
+            messages: vec![ChatMsg {
+                role: "user".into(),
+                content: content.into(),
+            }],
+            meta: Meta {
+                conversation_id: conversation.into(),
+                model: "m".into(),
+                created_at: Utc::now(),
+                edited: false,
+                source: "test".into(),
+                original_assistant: None,
+            },
+        }
+    }
+
+    #[test]
+    fn write_split_keeps_conversations_whole() {
+        let dir =
+            std::env::temp_dir().join(format!("gene-split-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 4 conversations, 2 examples each, interleaved; content encodes the conv.
+        let mut examples = Vec::new();
+        for round in 0..2 {
+            for conv in ["a", "b", "c", "d"] {
+                examples.push(sft(conv, &format!("{conv}-{round}")));
+            }
+        }
+        write_split(&examples, &dir, 0.25).unwrap();
+
+        let convs = |file: &str| -> std::collections::BTreeSet<char> {
+            std::fs::read_to_string(dir.join(file))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| {
+                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                    v["messages"][0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .chars()
+                        .next()
+                        .unwrap()
+                })
+                .collect()
+        };
+        let train = convs("train.jsonl");
+        let valid = convs("valid.jsonl");
+        assert!(!train.is_empty() && !valid.is_empty());
+        // No conversation lands in both train and valid.
+        assert!(train.is_disjoint(&valid));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

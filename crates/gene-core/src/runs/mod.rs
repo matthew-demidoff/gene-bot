@@ -76,7 +76,7 @@ impl DatasetRef {
         }
         Ok(DatasetRef {
             path: path.display().to_string(),
-            content_hash: format!("{:016x}", fnv1a(text.as_bytes())),
+            content_hash: format!("{:016x}", crate::hash::fnv1a(text.as_bytes())),
             n_examples,
             n_edited,
             source_conversations: conversations.into_iter().collect(),
@@ -243,17 +243,6 @@ impl RunStore {
     }
 }
 
-/// FNV-1a (64-bit). Stable across releases — unlike `DefaultHasher` — so dataset
-/// content hashes stay comparable over time.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,13 +289,6 @@ mod tests {
         assert_eq!(listed.len(), 1);
 
         fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn fnv1a_is_stable_and_distinct() {
-        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
-        assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
-        assert_eq!(fnv1a(b"gene"), fnv1a(b"gene"));
     }
 
     #[test]
