@@ -96,6 +96,8 @@ pub struct Paths {
     pub log_path: String,
     /// "" => <data_dir>/finetune  (working dir for training artifacts)
     pub work_dir: String,
+    /// "" => <data_dir>/runs  (experiment-tracking run store)
+    pub runs_dir: String,
 }
 
 /// Fine-tuning pipeline: pluggable command templates + the model bridge between
@@ -380,6 +382,10 @@ impl Config {
 
     pub fn work_dir(&self) -> Result<PathBuf> {
         self.resolve_path(&self.paths.work_dir, "finetune")
+    }
+
+    pub fn runs_dir(&self) -> Result<PathBuf> {
+        self.resolve_path(&self.paths.runs_dir, "runs")
     }
 
     /// The provider profile used for chat, falling back to the top-level

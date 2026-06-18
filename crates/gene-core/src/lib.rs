@@ -11,5 +11,6 @@ pub mod llm;
 pub mod model;
 pub mod persist;
 pub mod provider;
+pub mod runs;
 pub mod tools;
 pub mod train;
