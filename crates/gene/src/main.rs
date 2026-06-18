@@ -93,6 +93,7 @@ enum ConfigCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    reset_sigpipe();
     let cli = Cli::parse();
     let (mut cfg, cfg_path) = Config::load(cli.config.as_deref())?;
     if let Some(m) = cli.model {
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
     }
     let json = cli.json;
 
-    match cli.command {
+    let result = match cli.command {
         Some(Cmd::Chat(a)) => {
             cli::chat(
                 &cfg,
@@ -126,13 +127,41 @@ async fn main() -> Result<()> {
         },
         Some(Cmd::Config { cmd }) => match cmd {
             ConfigCmd::Path => cli::config_path(&cfg_path),
-            ConfigCmd::Show => cli::config_show(&cfg, &cfg_path, json),
+            ConfigCmd::Show => cli::config_show(&cfg, json),
         },
         Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
         // No subcommand launches the desktop GUI (when this build includes it).
         None => launch_gui(cfg, cfg_path),
+    };
+
+    // With --json, surface errors as JSON on stderr (consistent machine-readable
+    // contract) and exit non-zero; otherwise let anyhow render them as text.
+    match result {
+        Err(e) if json => {
+            let obj = serde_json::json!({ "error": format!("{e:#}") });
+            eprintln!(
+                "{}",
+                serde_json::to_string(&obj).unwrap_or_else(|_| format!("{{\"error\":\"{e}\"}}"))
+            );
+            std::process::exit(1);
+        }
+        other => other,
     }
 }
+
+/// Restore the default SIGPIPE disposition so `gene … | head` (and other closed
+/// pipes) terminate cleanly instead of panicking on a failed stdout write.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: resetting a signal to its default handler before any threads rely
+    // on a custom disposition is sound.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
 
 #[cfg(feature = "gui")]
 fn launch_gui(cfg: Config, cfg_path: PathBuf) -> Result<()> {

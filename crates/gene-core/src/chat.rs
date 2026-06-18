@@ -74,3 +74,43 @@ pub fn build_wire(system_prompt: &str, messages: &[Message]) -> Vec<WireMessage>
     }
     wire
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Message;
+
+    #[test]
+    fn build_wire_shapes_the_conversation() {
+        let mut tool = Message::new(Role::Tool, "the output");
+        tool.command = Some("ls".into());
+        let messages = vec![
+            Message::new(Role::User, "hi"),
+            Message::new(Role::Assistant, "hello"),
+            tool,
+            Message::new(Role::User, "   "), // blank -> skipped
+        ];
+
+        let wire = build_wire("SYS", &messages);
+
+        assert_eq!(wire.len(), 4); // system + user + assistant + tool-as-user
+        assert_eq!(
+            (wire[0].role.as_str(), wire[0].content.as_str()),
+            ("system", "SYS")
+        );
+        assert_eq!(
+            (wire[1].role.as_str(), wire[1].content.as_str()),
+            ("user", "hi")
+        );
+        assert_eq!(wire[2].role, "assistant");
+        assert_eq!(wire[3].role, "user");
+        assert!(wire[3].content.starts_with("[output of `ls`]"));
+    }
+
+    #[test]
+    fn modes_select_prompt_and_command_detection() {
+        assert!(Mode::Assistant.detect_commands());
+        assert!(!Mode::Tech.detect_commands());
+        assert!(!Mode::Convo.detect_commands());
+    }
+}

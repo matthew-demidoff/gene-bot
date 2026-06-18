@@ -44,20 +44,31 @@ pub async fn report(config: &Config) -> DoctorReport {
     });
 
     // Probe the provider the chat path actually uses, via its own discovery
-    // endpoint (Ollama /api/tags or OpenAI-compatible /v1/models) — not a
-    // hardcoded legacy URL.
-    let provider = config.chat_provider(crate::provider::http_client());
-    let reachable = provider.reachable().await;
-    let endpoint = provider.endpoint().to_string();
-    checks.push(Check {
-        name: "chat provider reachable".into(),
-        ok: reachable,
-        detail: if reachable {
-            endpoint.clone()
-        } else {
-            format!("not reachable: {endpoint}")
-        },
-    });
+    // endpoint (Ollama /api/tags or OpenAI-compatible /v1/models). A dangling
+    // roles.chat is reported as a failure, not silently probed via the fallback.
+    let endpoint = if config.chat_role_is_dangling() {
+        let role = config.roles.chat.clone().unwrap_or_default();
+        checks.push(Check {
+            name: "chat provider reachable".into(),
+            ok: false,
+            detail: format!("[roles].chat = '{role}' is not a configured provider"),
+        });
+        "(unresolved)".to_string()
+    } else {
+        let provider = config.chat_provider(crate::provider::http_client());
+        let endpoint = provider.endpoint().to_string();
+        let reachable = provider.reachable().await;
+        checks.push(Check {
+            name: "chat provider reachable".into(),
+            ok: reachable,
+            detail: if reachable {
+                endpoint.clone()
+            } else {
+                format!("not reachable: {endpoint}")
+            },
+        });
+        endpoint
+    };
 
     let py = cmd_version("python3", &["--version"]);
     checks.push(Check {

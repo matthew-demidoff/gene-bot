@@ -149,7 +149,13 @@ impl Provider {
     /// The model-discovery URL for this backend (Ollama `/api/tags`,
     /// OpenAI-compatible `/v1/models`). Empty if the base URL is unusable.
     fn discovery_url(&self) -> String {
-        let root = self.base_url.split("/v1/").next().unwrap_or_default();
+        // Split at the first "/v1" so both ".../v1/chat/completions" and a bare
+        // ".../v1" yield the same root (no doubled "/v1/v1/models").
+        let root = self
+            .base_url
+            .split_once("/v1")
+            .map(|(root, _)| root)
+            .unwrap_or(&self.base_url);
         if root.is_empty() {
             return String::new();
         }

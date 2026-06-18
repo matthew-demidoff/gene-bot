@@ -1364,6 +1364,7 @@ dependencies = [
  "egui",
  "egui_plot",
  "gene-core",
+ "libc",
  "reqwest",
  "serde_json",
  "tokio",

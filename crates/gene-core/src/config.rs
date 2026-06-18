@@ -501,4 +501,17 @@ mod tests {
         };
         assert_eq!(cfg.chat_request(vec![]).model, "m-only");
     }
+
+    #[test]
+    fn dangling_chat_role_detected() {
+        let dangling = Config {
+            roles: Roles {
+                chat: Some("nope".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert!(dangling.chat_role_is_dangling());
+        assert!(!Config::default().chat_role_is_dangling());
+    }
 }

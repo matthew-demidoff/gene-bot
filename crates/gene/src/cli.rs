@@ -76,6 +76,8 @@ pub async fn chat(
     let provider = cfg.chat_provider(http_client());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
     let producer = provider.chat_stream(request, mode.detect_commands(), tx);
+    // NB: `consume` accumulates for --json and streams live otherwise; a
+    // stream/provider error is surfaced as a non-zero exit after output (below).
 
     let consume = async {
         let mut answer = String::new();
@@ -129,9 +131,11 @@ pub async fn chat(
         println!("{}", serde_json::to_string_pretty(&obj)?);
     } else {
         println!();
-        if let Some(e) = error {
-            bail!("{e}");
-        }
+    }
+    // Non-zero exit on a stream/provider error in both modes (the JSON body
+    // above still carries the error for machine consumers).
+    if let Some(e) = error {
+        bail!("{e}");
     }
     Ok(())
 }
@@ -162,6 +166,7 @@ fn summary_line(summary: &std::collections::BTreeMap<String, f64>) -> String {
 
 pub fn run_list(cfg: &Config, json: bool) -> Result<()> {
     let store = RunStore::new(cfg.runs_dir()?);
+    store.reconcile();
     let runs = store.list();
     if json {
         println!("{}", serde_json::to_string(&runs)?);
@@ -186,6 +191,7 @@ pub fn run_list(cfg: &Config, json: bool) -> Result<()> {
 
 pub fn run_show(cfg: &Config, id: &str, json: bool) -> Result<()> {
     let store = RunStore::new(cfg.runs_dir()?);
+    store.reconcile();
     let run = store.load(id)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&run)?);
@@ -220,15 +226,27 @@ pub fn config_path(cfg_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn config_show(cfg: &Config, cfg_path: &Path, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(cfg)?);
-        return Ok(());
+/// A clone of the config with API keys masked — `config show` writes to stdout
+/// (CI logs, scrollback, pasted issues), which must never carry a real token.
+fn redacted(cfg: &Config) -> Config {
+    let mut c = cfg.clone();
+    if !c.api_key.is_empty() {
+        c.api_key = "<redacted>".into();
     }
-    // Prefer the actual on-disk file; fall back to the resolved config as JSON.
-    match std::fs::read_to_string(cfg_path) {
-        Ok(text) => print!("{text}"),
-        Err(_) => println!("{}", serde_json::to_string_pretty(cfg)?),
+    for p in c.providers.values_mut() {
+        if !p.api_key.is_empty() {
+            p.api_key = "<redacted>".into();
+        }
+    }
+    c
+}
+
+pub fn config_show(cfg: &Config, json: bool) -> Result<()> {
+    let cfg = redacted(cfg);
+    if json {
+        println!("{}", serde_json::to_string(&cfg)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
     }
     Ok(())
 }
@@ -260,6 +278,9 @@ pub async fn doctor(cfg: &Config, json: bool) -> Result<()> {
         println!("endpoint:   {}", report.chat_endpoint);
         println!("mlx base:   {}", report.mlx_base);
         println!("dataset:    {}", report.dataset_path);
+    }
+    if !report.all_ok() {
+        bail!("some prerequisite checks failed");
     }
     Ok(())
 }
