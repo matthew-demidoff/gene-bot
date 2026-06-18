@@ -11,11 +11,11 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 
 use gene_core::config::Config;
-use gene_core::llm::{run_stream, StreamEvent, WireMessage};
+use gene_core::llm::{StreamEvent, WireMessage};
 use gene_core::model::{Conversation, Message, Role, TrainingExample};
+use gene_core::persist;
 use gene_core::tools::{self, run_command, ExecResult};
 use gene_core::train::{self, TrainMsg};
-use gene_core::{llm, persist};
 
 const USER: Color32 = Color32::from_rgb(120, 190, 255);
 const ASSISTANT: Color32 = Color32::from_rgb(140, 220, 150);
@@ -213,14 +213,14 @@ impl GuiApp {
         self.streaming_index = Some(idx);
         self.busy = Busy::Streaming;
 
-        let http = self.http.clone();
-        let cfg = self.config.clone();
+        let provider = self.config.chat_provider(self.http.clone());
+        let request = self.config.chat_request(wire);
         let detect = self.mode == Mode::Assistant;
         let app_tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let handle = self.rt.spawn(async move {
             let (s_tx, mut s_rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
-            let producer = run_stream(http, cfg, wire, detect, s_tx);
+            let producer = provider.chat_stream(request, detect, s_tx);
             let forward = async {
                 while let Some(ev) = s_rx.recv().await {
                     if app_tx.send(AppEvent::Stream(ev)).is_err() {
@@ -418,12 +418,11 @@ impl GuiApp {
 
     fn fetch_models(&mut self) {
         self.models = None;
-        let http = self.http.clone();
-        let base = self.config.base_url.clone();
+        let provider = self.config.chat_provider(self.http.clone());
         let app_tx = self.tx.clone();
         let ctx = self.ctx.clone();
         self.rt.spawn(async move {
-            let m = llm::list_models(&http, &base).await;
+            let m = provider.list_models().await;
             let _ = app_tx.send(AppEvent::Models(m));
             ctx.request_repaint();
         });

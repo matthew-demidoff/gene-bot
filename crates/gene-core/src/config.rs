@@ -4,11 +4,16 @@
 //! are stored as templates with `{placeholder}` slots so the trainer is pluggable
 //! without recompiling.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+
+use crate::llm::types::{ChatRequest, Sampling};
+use crate::llm::WireMessage;
+use crate::provider::{Provider, ProviderKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -31,6 +36,13 @@ pub struct Config {
     pub ui: Ui,
     pub paths: Paths,
     pub finetune: Finetune,
+
+    /// Named inference endpoints. Empty => use the top-level model/base_url/api_key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderProfile>,
+    /// Which provider profile each activity (chat/eval/judge) uses.
+    #[serde(default, skip_serializing_if = "Roles::is_empty")]
+    pub roles: Roles,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +50,18 @@ pub struct Config {
 pub struct Generation {
     pub temperature: f64,
     pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repetition_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +132,46 @@ pub struct Finetune {
     pub ollama_tag: String,
 }
 
+/// A named inference endpoint: which backend, where, and the default model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderProfile {
+    pub kind: ProviderKind,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl Default for ProviderProfile {
+    fn default() -> Self {
+        ProviderProfile {
+            kind: ProviderKind::Ollama,
+            base_url: "http://localhost:11434/v1/chat/completions".into(),
+            api_key: "ollama".into(),
+            model: String::new(),
+        }
+    }
+}
+
+/// Maps each activity to a named provider profile. Unset => fall back to chat,
+/// then to the first configured provider, then to the top-level fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Roles {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge: Option<String>,
+}
+
+impl Roles {
+    fn is_empty(&self) -> bool {
+        self.chat.is_none() && self.eval.is_none() && self.judge.is_none()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -122,6 +186,8 @@ impl Default for Config {
             ui: Ui::default(),
             paths: Paths::default(),
             finetune: Finetune::default(),
+            providers: BTreeMap::new(),
+            roles: Roles::default(),
         }
     }
 }
@@ -131,6 +197,28 @@ impl Default for Generation {
         Generation {
             temperature: 0.7,
             max_tokens: 4096,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            repetition_penalty: None,
+            seed: None,
+            stop: Vec::new(),
+        }
+    }
+}
+
+impl Generation {
+    /// The wire sampling parameters for this configuration.
+    pub fn to_sampling(&self) -> Sampling {
+        Sampling {
+            temperature: Some(self.temperature),
+            max_tokens: Some(self.max_tokens),
+            top_p: self.top_p,
+            top_k: self.top_k,
+            min_p: self.min_p,
+            repetition_penalty: self.repetition_penalty,
+            seed: self.seed,
+            stop: self.stop.clone(),
         }
     }
 }
@@ -292,5 +380,43 @@ impl Config {
 
     pub fn work_dir(&self) -> Result<PathBuf> {
         self.resolve_path(&self.paths.work_dir, "finetune")
+    }
+
+    /// The provider profile used for chat, falling back to the top-level
+    /// model/base_url/api_key when no named providers are configured.
+    fn chat_profile(&self) -> ProviderProfile {
+        let legacy = || ProviderProfile {
+            kind: ProviderKind::Ollama,
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+        };
+        if self.providers.is_empty() {
+            return legacy();
+        }
+        self.roles
+            .chat
+            .as_deref()
+            .and_then(|name| self.providers.get(name))
+            .or_else(|| self.providers.values().next())
+            .cloned()
+            .unwrap_or_else(legacy)
+    }
+
+    /// Build the chat [`Provider`] from the active profile.
+    pub fn chat_provider(&self, http: reqwest::Client) -> Provider {
+        let p = self.chat_profile();
+        Provider::new(p.kind, http, p.base_url, p.api_key)
+    }
+
+    /// Build a streaming chat request for `messages` using the active profile's
+    /// model and the configured sampling parameters.
+    pub fn chat_request(&self, messages: Vec<WireMessage>) -> ChatRequest {
+        ChatRequest {
+            model: self.chat_profile().model,
+            messages,
+            stream: true,
+            sampling: self.generation.to_sampling(),
+        }
     }
 }

@@ -9,15 +9,36 @@ pub struct WireMessage {
     pub content: String,
 }
 
+/// Sampling parameters for a chat request. Every field is optional: a `None`
+/// value (or an empty `stop` list) is omitted from the JSON body, so a backend
+/// never sees — and never rejects — a knob the caller didn't set.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Sampling {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repetition_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<WireMessage>,
     pub stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+    #[serde(flatten)]
+    pub sampling: Sampling,
 }
 
 #[derive(Debug, Deserialize)]
