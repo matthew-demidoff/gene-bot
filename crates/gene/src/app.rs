@@ -6,16 +6,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use egui::{Color32, RichText};
+use egui_plot::{Legend, Line, Plot, PlotPoints};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 
 use gene_core::config::Config;
-use gene_core::llm::{run_stream, StreamEvent, WireMessage};
+use gene_core::llm::{StreamEvent, WireMessage};
 use gene_core::model::{Conversation, Message, Role, TrainingExample};
+use gene_core::persist;
+use gene_core::runs::Metric;
 use gene_core::tools::{self, run_command, ExecResult};
 use gene_core::train::{self, TrainMsg};
-use gene_core::{llm, persist};
 
 const USER: Color32 = Color32::from_rgb(120, 190, 255);
 const ASSISTANT: Color32 = Color32::from_rgb(140, 220, 150);
@@ -102,11 +104,13 @@ pub struct GuiApp {
 
     conversations: Vec<ConvEntry>,
     train_log: Vec<String>,
+    train_metrics: Vec<Metric>,
     status: String,
 
     conversations_dir: PathBuf,
     dataset_path: PathBuf,
     work_dir: PathBuf,
+    runs_dir: PathBuf,
 }
 
 impl GuiApp {
@@ -121,6 +125,7 @@ impl GuiApp {
         let conversations_dir = config.conversations_dir().unwrap_or_default();
         let dataset_path = config.dataset_path().unwrap_or_default();
         let work_dir = config.work_dir().unwrap_or_default();
+        let runs_dir = config.runs_dir().unwrap_or_default();
         let auto_run = config.agent.auto_run;
         let conversations = persist::list_conversations(&conversations_dir);
 
@@ -151,10 +156,12 @@ impl GuiApp {
             show_help: false,
             conversations,
             train_log: Vec::new(),
+            train_metrics: Vec::new(),
             status: "ready".into(),
             conversations_dir,
             dataset_path,
             work_dir,
+            runs_dir,
         }
     }
 
@@ -213,14 +220,14 @@ impl GuiApp {
         self.streaming_index = Some(idx);
         self.busy = Busy::Streaming;
 
-        let http = self.http.clone();
-        let cfg = self.config.clone();
+        let provider = self.config.chat_provider(self.http.clone());
+        let request = self.config.chat_request(wire);
         let detect = self.mode == Mode::Assistant;
         let app_tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let handle = self.rt.spawn(async move {
             let (s_tx, mut s_rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
-            let producer = run_stream(http, cfg, wire, detect, s_tx);
+            let producer = provider.chat_stream(request, detect, s_tx);
             let forward = async {
                 while let Some(ev) = s_rx.recv().await {
                     if app_tx.send(AppEvent::Stream(ev)).is_err() {
@@ -371,6 +378,9 @@ impl GuiApp {
                     self.train_log.remove(0);
                 }
             }
+            TrainMsg::Metric(m) => {
+                self.train_metrics.push(m);
+            }
             TrainMsg::Done {
                 ok,
                 message,
@@ -398,12 +408,14 @@ impl GuiApp {
         }
         self.busy = Busy::Training;
         self.train_log.clear();
+        self.train_metrics.clear();
         self.status = "starting fine-tune…".into();
         let (t_tx, mut t_rx) = unbounded_channel::<TrainMsg>();
         train::start_training(
             self.config.clone(),
             self.work_dir.clone(),
             self.dataset_path.clone(),
+            self.runs_dir.clone(),
             t_tx,
         );
         let app_tx = self.tx.clone();
@@ -418,12 +430,11 @@ impl GuiApp {
 
     fn fetch_models(&mut self) {
         self.models = None;
-        let http = self.http.clone();
-        let base = self.config.base_url.clone();
+        let provider = self.config.chat_provider(self.http.clone());
         let app_tx = self.tx.clone();
         let ctx = self.ctx.clone();
         self.rt.spawn(async move {
-            let m = llm::list_models(&http, &base).await;
+            let m = provider.list_models().await;
             let _ = app_tx.send(AppEvent::Models(m));
             ctx.request_repaint();
         });
@@ -948,6 +959,28 @@ impl GuiApp {
                     "last run"
                 });
                 ui.separator();
+                if !self.train_metrics.is_empty() {
+                    let series = |field: &str| -> Vec<[f64; 2]> {
+                        self.train_metrics
+                            .iter()
+                            .filter_map(|m| m.fields.get(field).map(|v| [m.step as f64, *v]))
+                            .collect()
+                    };
+                    let train = series("train_loss");
+                    let val = series("val_loss");
+                    Plot::new("loss")
+                        .height(180.0)
+                        .legend(Legend::default())
+                        .show(ui, |plot_ui| {
+                            if !train.is_empty() {
+                                plot_ui.line(Line::new(PlotPoints::from(train)).name("train loss"));
+                            }
+                            if !val.is_empty() {
+                                plot_ui.line(Line::new(PlotPoints::from(val)).name("val loss"));
+                            }
+                        });
+                    ui.separator();
+                }
                 egui::ScrollArea::vertical()
                     .max_height(320.0)
                     .stick_to_bottom(true)
