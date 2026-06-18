@@ -8,6 +8,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod dataset;
 pub mod doctor;
 pub mod llm;
 pub mod model;
@@ -16,3 +17,5 @@ pub mod provider;
 pub mod runs;
 pub mod tools;
 pub mod train;
+
+mod hash;
