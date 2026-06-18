@@ -1,0 +1,30 @@
+[package]
+name = "gene-ai"
+description = "gene: a local-first toolkit for chatting with, evaluating, and fine-tuning open LLMs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "gene"
+
+[[bin]]
+name = "gene"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+# The egui desktop frontend. Disable (`--no-default-features`) for a lean
+# headless CLI with no GUI/windowing build dependencies.
+gui = ["dep:eframe", "dep:egui"]
+
+[dependencies]
+gene-core = { path = "../gene-core" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe = { workspace = true, optional = true }
+egui = { workspace = true, optional = true }

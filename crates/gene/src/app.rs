@@ -10,12 +10,12 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 
-use crate::config::Config;
-use crate::llm::{run_stream, StreamEvent, WireMessage};
-use crate::model::{Conversation, Message, Role, TrainingExample};
-use crate::tools::{self, run_command, ExecResult};
-use crate::train::{self, TrainMsg};
-use crate::{llm, persist};
+use gene_core::config::Config;
+use gene_core::llm::{run_stream, StreamEvent, WireMessage};
+use gene_core::model::{Conversation, Message, Role, TrainingExample};
+use gene_core::tools::{self, run_command, ExecResult};
+use gene_core::train::{self, TrainMsg};
+use gene_core::{llm, persist};
 
 const USER: Color32 = Color32::from_rgb(120, 190, 255);
 const ASSISTANT: Color32 = Color32::from_rgb(140, 220, 150);

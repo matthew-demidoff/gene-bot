@@ -1,26 +1,24 @@
-//! gene: a personal desktop AI assistant. Chat with a local uncensored model,
-//! edit its replies to teach it, run shell commands as an agent, and fine-tune
-//! (LoRA) on your corrected conversations.
-
-mod config;
-mod gui;
-mod llm;
-mod model;
-mod persist;
-mod tools;
-mod train;
+//! gene: a local-first toolkit for chatting with, evaluating, and fine-tuning
+//! open LLMs. This binary is the CLI plus — with the default `gui` feature — the
+//! egui desktop frontend; all engine logic lives in the `gene-core` library.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
-use config::Config;
+use gene_core::config::Config;
+
+#[cfg(feature = "gui")]
+mod app;
 
 #[derive(Parser)]
-#[command(name = "gene", version, about = "Personal desktop AI assistant")]
+#[command(
+    name = "gene",
+    version,
+    about = "Local-first toolkit for chatting with, evaluating, and fine-tuning open LLMs"
+)]
 struct Cli {
     /// Path to a config file (defaults to the platform config dir).
     #[arg(long)]
@@ -52,10 +50,15 @@ async fn main() -> Result<()> {
         cfg.base_url = u;
     }
 
-    if let Some(Cmd::Doctor) = cli.command {
-        return doctor(&cfg).await;
+    match cli.command {
+        Some(Cmd::Doctor) => doctor(&cfg).await,
+        // No subcommand launches the desktop GUI (when this build includes it).
+        None => launch_gui(cfg, cfg_path),
     }
+}
 
+#[cfg(feature = "gui")]
+fn launch_gui(cfg: Config, cfg_path: PathBuf) -> Result<()> {
     init_tracing(&cfg);
     tracing::info!("config loaded from {}", cfg_path.display());
 
@@ -73,13 +76,23 @@ async fn main() -> Result<()> {
     eframe::run_native(
         "gene",
         native_options,
-        Box::new(move |cc| Ok(Box::new(gui::GuiApp::new(cc, cfg, cfg_path, rt)))),
+        Box::new(move |cc| Ok(Box::new(app::GuiApp::new(cc, cfg, cfg_path, rt)))),
     )
     .map_err(|e| anyhow::anyhow!("gui error: {e}"))?;
     Ok(())
 }
 
+#[cfg(not(feature = "gui"))]
+fn launch_gui(_cfg: Config, _cfg_path: PathBuf) -> Result<()> {
+    anyhow::bail!(
+        "this build has no GUI (compiled with `--no-default-features`); \
+         run a subcommand such as `gene doctor`"
+    )
+}
+
+#[cfg(feature = "gui")]
 fn init_tracing(cfg: &Config) {
+    use tracing_subscriber::EnvFilter;
     let Ok(path) = cfg.log_path() else { return };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
