@@ -186,6 +186,14 @@ impl RunStore {
         Ok(())
     }
 
+    /// Write an arbitrary artifact file into the run's directory.
+    pub fn write_artifact(&self, id: &str, name: &str, content: &str) -> Result<()> {
+        let dir = self.run_dir(id);
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(name), content).with_context(|| format!("writing artifact {name}"))?;
+        Ok(())
+    }
+
     pub fn load(&self, id: &str) -> Result<Run> {
         let path = self.run_dir(id).join("run.json");
         let text =
