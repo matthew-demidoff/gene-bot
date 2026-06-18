@@ -14,8 +14,8 @@ an open-weight model you choose and run yourself.
 
 ## What it is
 
-- **Chat** with a local model. Three personas (`assistant` runs shell commands
-  via a confirm step, `tech` advises but never executes, `convo` is casual).
+- **Chat** with a local model. You write the system prompt (no built-in
+  personas); opt into a confirm-gated agentic shell with `agent.run_commands`.
   Streams token-by-token; reasoning models that emit `<think>…</think>` (or a
   `reasoning` field) get a collapsible thinking section.
 - **Edit-to-correct dataset building.** When a reply is wrong, edit it; the
@@ -72,6 +72,7 @@ The package is `gene-ai`; the binary is `gene`.
 
 ```sh
 gene                                  # launch the desktop GUI (no subcommand)
+gene setup                            # interactively write config.toml (model, prompt, …)
 gene doctor                           # check chat + fine-tune prerequisites
 gene chat -m "explain mmap in two sentences"
 gene dataset stats                    # counts for the accumulated dataset
@@ -102,7 +103,9 @@ command templates. See [docs/config.md](docs/config.md) for an annotated example
 
 ## Safety
 
-Approved commands run with your full user privileges — there is no sandbox.
+The agentic shell is **off by default** — set `agent.run_commands` (or tick "run
+commands" in the GUI) to let the model propose `` ```run `` blocks. Approved
+commands run with your full user privileges — there is no sandbox.
 Confirm-before-run is on by default; **auto-run** is opt-in and per-session, and
 the denylist (`rm -rf`, `sudo`, `mkfs`, `dd `, fork bombs, …) still forces a
 manual confirm for dangerous patterns. Review commands before approving.
