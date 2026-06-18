@@ -1365,6 +1365,7 @@ dependencies = [
  "egui_plot",
  "gene-core",
  "reqwest",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
