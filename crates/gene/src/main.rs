@@ -69,6 +69,8 @@ enum Cmd {
     },
     /// Report whether the chat + fine-tuning prerequisites are installed.
     Doctor,
+    /// Interactively configure gene (provider, model, prompt, sampling, fine-tune).
+    Setup,
 }
 
 #[derive(Args)]
@@ -76,9 +78,6 @@ struct ChatArgs {
     /// The prompt. If omitted, the prompt is read from stdin.
     #[arg(short, long)]
     message: Option<String>,
-    /// Persona: assistant | tech | convo.
-    #[arg(long, default_value = "tech")]
-    mode: String,
     #[arg(long)]
     temperature: Option<f64>,
     #[arg(long)]
@@ -234,16 +233,7 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         Some(Cmd::Chat(a)) => {
-            cli::chat(
-                &cfg,
-                &a.mode,
-                a.message,
-                a.temperature,
-                a.max_tokens,
-                a.seed,
-                json,
-            )
-            .await
+            cli::chat(&cfg, a.message, a.temperature, a.max_tokens, a.seed, json).await
         }
         Some(Cmd::Models) => cli::models(&cfg, json).await,
         Some(Cmd::Run { cmd }) => match cmd {
@@ -291,6 +281,7 @@ async fn main() -> Result<()> {
             }
         },
         Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
+        Some(Cmd::Setup) => cli::setup(cfg, &cfg_path).await,
         // No subcommand launches the desktop GUI (when this build includes it).
         None => launch_gui(cfg, cfg_path),
     };

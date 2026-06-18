@@ -27,6 +27,31 @@ gene --json doctor
 
 ---
 
+## setup
+
+Interactively write `config.toml`. Walks through the backend kind (`ollama` |
+`openai`), the chat-completions URL and API key, lists the models the endpoint
+reports and lets you pick one (by number or name), the system prompt (inline or
+via `$EDITOR`/`$VISUAL`), the `run_commands` toggle, sampling defaults
+(temperature, max-tokens), and the fine-tune settings (MLX base, method, deploy
+mode). Press Enter at any prompt to keep the current value; the file is written
+atomically with owner-only (`0600`) permissions.
+
+```sh
+gene setup
+gene --config ./gene.toml setup   # write a specific file
+```
+
+The system prompt is yours to write — gene ships no default and no built-in
+personas. Leave it blank for no system message.
+
+`setup` manages the simple single-endpoint config (the top-level
+`model`/`base_url`/`api_key`/`kind`). If the config already uses named
+`[providers]`, setup refuses and points you at the file to edit the profile
+directly.
+
+---
+
 ## chat
 
 Chat with the model: one-shot via `--message`, or read the prompt from stdin.
@@ -34,18 +59,21 @@ Chat with the model: one-shot via `--message`, or read the prompt from stdin.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-m`, `--message <text>` | (stdin) | The prompt. If omitted, read from stdin. |
-| `--mode <persona>` | `tech` | `assistant` (parses ```run blocks as commands), `tech` (advises, never executes), `convo` (casual). |
 | `--temperature <f>` | config | Override sampling temperature for this run. |
 | `--max-tokens <n>` | config | Override the max-tokens cap. |
 | `--seed <n>` | config | Override the sampling seed. |
 
+The model's behavior is set by `system_prompt` in the config (empty by default —
+you write your own; `gene setup` helps). There are no built-in personas.
+
 ```sh
 gene chat -m "write a bash one-liner to find large files"
-echo "summarize this" | gene chat --mode convo
+echo "summarize this" | gene chat
 ```
 
-> Note: the CLI `chat` does not execute ```run blocks — in `assistant` mode it
-> prints suggested commands. Command execution (confirm-gated) is a GUI feature.
+> Note: the CLI `chat` does not execute ```run blocks — when `agent.run_commands`
+> is on it prints suggested commands. Command execution (confirm-gated) is a GUI
+> feature.
 
 `--json` shape (fields present only when non-empty):
 

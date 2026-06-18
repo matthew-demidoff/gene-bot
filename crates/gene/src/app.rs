@@ -11,7 +11,6 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 
-use gene_core::chat::Mode;
 use gene_core::config::Config;
 use gene_core::llm::{StreamEvent, WireMessage};
 use gene_core::model::{Conversation, Message, Role, TrainingExample};
@@ -55,7 +54,6 @@ pub struct GuiApp {
     config: Config,
     config_path: PathBuf,
     conv: Conversation,
-    mode: Mode,
 
     http: reqwest::Client,
     rt: Handle,
@@ -117,7 +115,6 @@ impl GuiApp {
             config,
             config_path,
             conv,
-            mode: Mode::Assistant,
             http: gene_core::provider::http_client(),
             rt,
             ctx: cc.egui_ctx.clone(),
@@ -149,13 +146,8 @@ impl GuiApp {
         }
     }
 
-    fn effective_system_prompt(&self) -> String {
-        self.mode
-            .system_prompt(&self.config, &self.conv.system_prompt)
-    }
-
     fn build_wire(&self) -> Vec<WireMessage> {
-        gene_core::chat::build_wire(&self.effective_system_prompt(), &self.conv.messages)
+        gene_core::chat::build_wire(&self.conv.system_prompt, &self.conv.messages)
     }
 
     fn submit_input(&mut self) {
@@ -177,7 +169,7 @@ impl GuiApp {
 
         let provider = self.config.chat_provider(self.http.clone());
         let request = self.config.chat_request(wire);
-        let detect = self.mode.detect_commands();
+        let detect = self.config.agent.run_commands;
         let app_tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let handle = self.rt.spawn(async move {
@@ -466,13 +458,10 @@ impl GuiApp {
     }
 
     fn save_config(&mut self) {
-        match toml::to_string_pretty(&self.config) {
-            Ok(s) => match std::fs::write(&self.config_path, s) {
-                Ok(()) => self.status = "config saved".into(),
-                Err(e) => self.status = format!("config save failed: {e}"),
-            },
-            Err(e) => self.status = format!("config serialize failed: {e}"),
-        }
+        self.status = match self.config.save(&self.config_path) {
+            Ok(()) => "config saved".into(),
+            Err(e) => format!("config save failed: {e}"),
+        };
     }
 
     fn refresh_conversations(&mut self) {
@@ -519,18 +508,6 @@ impl GuiApp {
                 ui.heading("gene");
                 ui.separator();
 
-                egui::ComboBox::from_id_salt("mode")
-                    .selected_text(self.mode.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.mode,
-                            Mode::Assistant,
-                            Mode::Assistant.label(),
-                        );
-                        ui.selectable_value(&mut self.mode, Mode::Tech, Mode::Tech.label());
-                        ui.selectable_value(&mut self.mode, Mode::Convo, Mode::Convo.label());
-                    });
-
                 if ui.button(format!("model: {}", self.config.model)).clicked() {
                     self.show_model_picker = true;
                     if self.models.is_none() {
@@ -538,9 +515,13 @@ impl GuiApp {
                     }
                 }
 
-                ui.checkbox(&mut self.auto_run, "auto-run").on_hover_text(
-                    "run proposed commands without confirming (denylist still asks)",
-                );
+                ui.checkbox(&mut self.config.agent.run_commands, "run commands")
+                    .on_hover_text("parse ```run blocks from replies and run them (confirm-gated)");
+                if self.config.agent.run_commands {
+                    ui.checkbox(&mut self.auto_run, "auto-run").on_hover_text(
+                        "run proposed commands without confirming (denylist still asks)",
+                    );
+                }
 
                 ui.separator();
                 if ui.button("new").clicked() {
@@ -836,24 +817,10 @@ impl GuiApp {
                         );
                         ui.add_space(10.0);
 
-                        ui.label(RichText::new("Assistant system prompt (runs commands)").strong());
+                        ui.label(RichText::new("System prompt (blank = none)").strong());
                         ui.add(
                             egui::TextEdit::multiline(&mut self.config.system_prompt)
                                 .desired_rows(4)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("Tech-guy system prompt").strong());
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.config.tech_system_prompt)
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("Convo system prompt").strong());
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.config.convo_system_prompt)
-                                .desired_rows(3)
                                 .desired_width(f32::INFINITY),
                         );
                         ui.add_space(8.0);
@@ -872,7 +839,7 @@ impl GuiApp {
                 });
             });
         if save_cfg {
-            // Assistant prompt also drives the current conversation.
+            // The system prompt also drives the current conversation.
             self.conv.system_prompt = self.config.system_prompt.clone();
             self.save_config();
         }
@@ -887,7 +854,7 @@ impl GuiApp {
         }
         let mut open = true;
         egui::Window::new("Help").open(&mut open).resizable(true).show(ctx, |ui| {
-            ui.label("• Modes: assistant runs shell commands (with confirm); tech-guy and convo just talk.");
+            ui.label("• 'run commands' lets the model propose shell commands; they run confirm-gated (auto-run skips the prompt).");
             ui.label("• Edit a reply with its 'edit' button to correct it — saved replies train the model.");
             ui.label("• 'fine-tune' runs a real LoRA pass on your edited dataset (needs mlx-lm).");
             ui.label("• Pick past chats from the left sidebar; 'new' starts a fresh one.");

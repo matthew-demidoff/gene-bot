@@ -7,24 +7,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use gene_core::chat::{build_wire, Mode};
+use gene_core::chat::build_wire;
 use gene_core::config::Config;
 use gene_core::dataset::{self, format::Format};
 use gene_core::eval;
 use gene_core::llm::StreamEvent;
 use gene_core::model::{Message, Role};
-use gene_core::provider::{http_client, Provider};
+use gene_core::provider::{http_client, Provider, ProviderKind};
 use gene_core::runs::{DatasetRef, RunStore};
 use gene_core::train::{self, TrainMsg};
-
-fn parse_mode(s: &str) -> Result<Mode> {
-    match s {
-        "assistant" => Ok(Mode::Assistant),
-        "tech" => Ok(Mode::Tech),
-        "convo" => Ok(Mode::Convo),
-        other => bail!("unknown mode '{other}' (expected assistant | tech | convo)"),
-    }
-}
 
 fn read_stdin() -> Result<String> {
     let mut s = String::new();
@@ -46,7 +37,6 @@ fn ensure_provider_resolvable(cfg: &Config) -> Result<()> {
 
 pub async fn chat(
     cfg: &Config,
-    mode: &str,
     message: Option<String>,
     temperature: Option<f64>,
     max_tokens: Option<u32>,
@@ -54,7 +44,6 @@ pub async fn chat(
     json: bool,
 ) -> Result<()> {
     ensure_provider_resolvable(cfg)?;
-    let mode = parse_mode(mode)?;
     let prompt = match message {
         Some(m) => m,
         None => read_stdin()?,
@@ -63,9 +52,8 @@ pub async fn chat(
         bail!("empty prompt — pass --message or pipe text on stdin");
     }
 
-    let system = mode.system_prompt(cfg, &cfg.system_prompt);
     let messages = vec![Message::new(Role::User, prompt)];
-    let mut request = cfg.chat_request(build_wire(&system, &messages));
+    let mut request = cfg.chat_request(build_wire(&cfg.system_prompt, &messages));
     if let Some(t) = temperature {
         request.sampling.temperature = Some(t);
     }
@@ -78,7 +66,7 @@ pub async fn chat(
 
     let provider = cfg.chat_provider(http_client());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
-    let producer = provider.chat_stream(request, mode.detect_commands(), tx);
+    let producer = provider.chat_stream(request, cfg.agent.run_commands, tx);
     // NB: `consume` accumulates for --json and streams live otherwise; a
     // stream/provider error is surfaced as a non-zero exit after output (below).
 
@@ -777,4 +765,218 @@ pub async fn eval_compare(
         }
     }
     Ok(())
+}
+
+// ---- gene setup: interactive configuration ----
+
+/// Read one line of input. Bails on EOF (Ctrl-D / a closed or exhausted pipe) so
+/// a non-interactive run fails loudly instead of silently accepting every
+/// default and reporting a misleading "Saved".
+fn read_line() -> Result<String> {
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .read_line(&mut line)
+        .context("reading stdin")?;
+    if n == 0 {
+        bail!("unexpected end of input — `gene setup` is interactive; run it in a terminal");
+    }
+    Ok(line)
+}
+
+/// Prompt with the current value in brackets; empty input keeps it.
+fn ask(label: &str, current: &str) -> Result<String> {
+    print!("{label} [{current}]: ");
+    std::io::stdout().flush().ok();
+    let line = read_line()?;
+    let line = line.trim();
+    Ok(if line.is_empty() {
+        current.to_string()
+    } else {
+        line.to_string()
+    })
+}
+
+/// Like [`ask`] but never echoes the stored secret — shows a masked hint and
+/// keeps the current value on empty input.
+fn ask_secret(label: &str, current: &str) -> Result<String> {
+    let hint = if current.is_empty() {
+        "unset"
+    } else {
+        "•••• — Enter keeps"
+    };
+    print!("{label} [{hint}]: ");
+    std::io::stdout().flush().ok();
+    let line = read_line()?;
+    let line = line.trim();
+    Ok(if line.is_empty() {
+        current.to_string()
+    } else {
+        line.to_string()
+    })
+}
+
+/// Prompt for a value that must parse as `T`, re-prompting on bad input instead
+/// of aborting the whole session (empty input keeps the already-valid current).
+fn ask_parse<T>(label: &str, current: T) -> Result<T>
+where
+    T: std::str::FromStr + std::fmt::Display,
+{
+    loop {
+        let entered = ask(label, &current.to_string())?;
+        match entered.parse() {
+            Ok(v) => return Ok(v),
+            Err(_) => println!("  ! '{entered}' is not valid — try again"),
+        }
+    }
+}
+
+fn confirm(label: &str, default: bool) -> Result<bool> {
+    let hint = if default { "Y/n" } else { "y/N" };
+    loop {
+        print!("{label} [{hint}]: ");
+        std::io::stdout().flush().ok();
+        match read_line()?.trim().to_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            other => println!("  ! answer y or n (got '{other}')"),
+        }
+    }
+}
+
+fn ask_kind(label: &str, current: ProviderKind) -> Result<ProviderKind> {
+    let cur = match current {
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::OpenAiCompat => "openai",
+    };
+    loop {
+        match ask(label, cur)?.to_lowercase().as_str() {
+            "ollama" => return Ok(ProviderKind::Ollama),
+            "openai" | "openai_compat" | "open_ai_compat" => return Ok(ProviderKind::OpenAiCompat),
+            other => println!("  ! choose 'ollama' or 'openai' (got '{other}')"),
+        }
+    }
+}
+
+/// Open the prompt in `$VISUAL`/`$EDITOR`, returning the edited text. The temp
+/// file holds the prompt, so it is removed on every exit path.
+fn edit_in_editor(current: &str) -> Result<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    // EDITOR commonly carries flags ("code --wait", "emacsclient -nw"); split the
+    // program from its args rather than treating the whole string as a binary.
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let args: Vec<&str> = parts.collect();
+
+    let path = std::env::temp_dir().join(format!("gene-prompt-{}.txt", std::process::id()));
+    std::fs::write(&path, current).with_context(|| format!("writing {}", path.display()))?;
+    let result = run_editor(program, &args, &path);
+    std::fs::remove_file(&path).ok();
+    result
+}
+
+fn run_editor(program: &str, args: &[&str], path: &Path) -> Result<String> {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .arg(path)
+        .status()
+        .with_context(|| format!("launching editor ({program})"))?;
+    if !status.success() {
+        bail!("editor exited with {status}");
+    }
+    Ok(std::fs::read_to_string(path)?.trim_end().to_string())
+}
+
+pub async fn setup(mut cfg: Config, cfg_path: &Path) -> Result<()> {
+    // setup only manages the simple single-endpoint config (the top-level
+    // model/base_url/api_key/kind). Named [providers] win over those fields, so
+    // editing them here would be a silent no-op — refuse and point at the file.
+    if !cfg.providers.is_empty() {
+        bail!(
+            "this config uses named [providers]; `gene setup` only manages the simple \
+             single-endpoint config. Edit {} directly to change a provider profile.",
+            cfg_path.display()
+        );
+    }
+
+    println!(
+        "gene setup — configuring {}\n(press Enter to keep the current value in brackets)\n",
+        cfg_path.display()
+    );
+
+    println!("Provider & model");
+    cfg.kind = ask_kind("  backend (ollama|openai)", cfg.kind)?;
+    cfg.base_url = ask("  chat completions URL", &cfg.base_url)?;
+    // Chat POSTs to this URL verbatim (model discovery is derived separately), so
+    // a bare root lists models but 404s on chat. Nudge, don't block.
+    if !cfg.base_url.contains("/chat/completions") {
+        println!("  ! note: chat POSTs here verbatim — this usually ends in /v1/chat/completions");
+    }
+    cfg.api_key = ask_secret("  API key (Ollama ignores it)", &cfg.api_key)?;
+
+    let provider = cfg.chat_provider(http_client());
+    let models = provider.list_models().await;
+    if models.is_empty() {
+        println!("  (no models discovered at this endpoint — type the model id)");
+        cfg.model = ask("  model", &cfg.model)?;
+    } else {
+        cfg.model = pick_model(&models, &cfg.model)?;
+    }
+
+    println!("\nSystem prompt (sent before every conversation; blank = none)");
+    if confirm("  edit in $EDITOR?", false)? {
+        cfg.system_prompt = edit_in_editor(&cfg.system_prompt)?;
+    } else {
+        cfg.system_prompt = ask("  system prompt", &cfg.system_prompt)?;
+    }
+    cfg.agent.run_commands = confirm(
+        "  let the model run shell commands (```run, confirm-gated)?",
+        cfg.agent.run_commands,
+    )?;
+
+    println!("\nSampling defaults");
+    cfg.generation.temperature = ask_parse("  temperature", cfg.generation.temperature)?;
+    cfg.generation.max_tokens = ask_parse("  max tokens", cfg.generation.max_tokens)?;
+
+    println!("\nFine-tuning");
+    cfg.finetune.mlx_base = ask("  base model (MLX)", &cfg.finetune.mlx_base)?;
+    cfg.finetune.method = ask("  method (lora|dora|full)", &cfg.finetune.method)?;
+    cfg.finetune.deploy_mode = ask(
+        "  deploy mode (mlx_server|ollama_gguf)",
+        &cfg.finetune.deploy_mode,
+    )?;
+
+    cfg.save(cfg_path)?;
+    println!("\nSaved {}", cfg_path.display());
+    Ok(())
+}
+
+/// Pick a model by number or exact name, re-prompting on an out-of-range number
+/// rather than silently saving "7" as a (bogus) model id.
+fn pick_model(models: &[String], current: &str) -> Result<String> {
+    println!("  available models:");
+    for (i, m) in models.iter().enumerate() {
+        let cur = if m == current { "  (current)" } else { "" };
+        println!("    {}. {m}{cur}", i + 1);
+    }
+    loop {
+        let choice = ask("  model (number or name)", current)?;
+        // An exact name match wins first, so a backend that serves a numerically
+        // named model is still selectable by typing its name.
+        if models.iter().any(|m| m == &choice) {
+            return Ok(choice);
+        }
+        match choice.parse::<usize>() {
+            Ok(n) if (1..=models.len()).contains(&n) => return Ok(models[n - 1].clone()),
+            Ok(_) => println!("  ! pick 1..={} (or type a model name)", models.len()),
+            // Not a number and not a listed name: accept it as a literal id (the
+            // endpoint may serve more than it lists), but say so.
+            Err(_) => {
+                println!("  ! '{choice}' isn't in the list — using it as a literal model id");
+                return Ok(choice);
+            }
+        }
+    }
 }

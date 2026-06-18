@@ -24,12 +24,13 @@ pub struct Config {
     pub base_url: String,
     /// API key. Ollama ignores it; any non-empty string is fine.
     pub api_key: String,
-    /// System prompt for Assistant mode; instructs the model on the ```run convention.
+    /// Backend kind for the legacy single-endpoint path. Only model discovery
+    /// differs by kind (Ollama `/api/tags` vs OpenAI `/v1/models`); the chat path
+    /// is OpenAI-compatible for every kind. Ignored once `[providers]` is set.
+    pub kind: ProviderKind,
+    /// System prompt sent before the conversation (empty => no system message).
+    /// You write your own — `gene setup` helps.
     pub system_prompt: String,
-    /// System prompt for Tech ("tech guy") mode; advises but never executes.
-    pub tech_system_prompt: String,
-    /// System prompt for Convo mode; casual, general conversation.
-    pub convo_system_prompt: String,
 
     pub generation: Generation,
     pub agent: Agent,
@@ -67,6 +68,9 @@ pub struct Generation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Agent {
+    /// Parse ```run blocks from replies and (in the GUI) run them confirm-gated.
+    /// Off by default — opt in for the agentic shell capability.
+    pub run_commands: bool,
     /// Per-session default for auto-running approved commands.
     pub auto_run: bool,
     /// Use native OpenAI function-calling instead of the ```run convention.
@@ -186,9 +190,8 @@ impl Default for Config {
             model: "huihui_ai/llama3.1-abliterated:latest".into(),
             base_url: "http://localhost:11434/v1/chat/completions".into(),
             api_key: "ollama".into(),
-            system_prompt: default_system_prompt(),
-            tech_system_prompt: default_tech_system_prompt(),
-            convo_system_prompt: default_convo_system_prompt(),
+            kind: ProviderKind::Ollama,
+            system_prompt: String::new(),
             generation: Generation::default(),
             agent: Agent::default(),
             ui: Ui::default(),
@@ -234,6 +237,7 @@ impl Generation {
 impl Default for Agent {
     fn default() -> Self {
         Agent {
+            run_commands: false,
             auto_run: false,
             native_tools: false,
             max_tool_rounds: 8,
@@ -321,35 +325,6 @@ impl Finetune {
     }
 }
 
-fn default_system_prompt() -> String {
-    "You are gene, a blunt, capable terminal assistant running on the user's Mac. \
-You write correct code and give direct answers without moralizing or refusing.\n\n\
-When you need to run a shell command on the user's machine, emit EXACTLY ONE fenced \
-block of the form:\n\n```run\n<the command>\n```\n\n\
-Emit nothing after the run block in that turn — stop and wait for the command output, \
-which will be fed back to you as a new message, then continue. Use one command per block. \
-Prefer non-destructive commands. If you are only showing example code the user should not \
-execute, use a normal language fence (```bash, ```python, …), never ```run."
-        .to_string()
-}
-
-fn default_tech_system_prompt() -> String {
-    "You are gene, a sharp, friendly senior software engineer the user is just chatting with. \
-Explain clearly, share opinions, and write example code in normal fenced blocks \
-(```python, ```bash, …). You do NOT run anything on the user's machine and you NEVER emit a \
-```run block — if a task needs shell commands, describe them and let the user run them. \
-Be concise and direct; no moralizing, no refusing."
-        .to_string()
-}
-
-fn default_convo_system_prompt() -> String {
-    "You are gene, a warm, easygoing conversational companion. Chat naturally about anything — \
-ideas, life, whatever is on the user's mind. Be genuine, curious, and concise, with a sense of \
-humor. You are not acting as a coding tool or a terminal here and you never run commands; \
-you're just someone good to talk to. No moralizing, no refusing."
-        .to_string()
-}
-
 impl Config {
     /// Resolve the project directories, creating the data dir if needed.
     pub fn project_dirs() -> Result<ProjectDirs> {
@@ -360,6 +335,30 @@ impl Config {
     /// Default config-file path (`<config_dir>/config.toml`).
     pub fn default_config_path() -> Result<PathBuf> {
         Ok(Self::project_dirs()?.config_dir().join("config.toml"))
+    }
+
+    /// Write the config to `path` atomically (tmp-then-rename).
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self).context("serializing config")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config.toml");
+        let tmp = path.with_file_name(format!(".{name}.tmp"));
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        // The file can hold an API key, so keep it owner-only (and close the
+        // window where the tmp file is group/world-readable) before the rename.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("securing {}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, path).with_context(|| format!("finalizing {}", path.display()))?;
+        Ok(())
     }
 
     /// Load config from `path` (or the default path). Writes a default file if absent.
@@ -423,7 +422,7 @@ impl Config {
     /// model/base_url/api_key when no named providers are configured.
     fn chat_profile(&self) -> ProviderProfile {
         let legacy = || ProviderProfile {
-            kind: ProviderKind::Ollama,
+            kind: self.kind,
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
             model: self.model.clone(),
@@ -577,5 +576,68 @@ mod tests {
 
         // lora is always fine (matches any legacy template)
         assert!(Finetune::default().check_method().is_ok());
+    }
+
+    /// A legacy `config.toml` that still carries the removed persona prompts must
+    /// keep loading — serde drops the unknown keys (no `deny_unknown_fields`) and
+    /// the new `agent.run_commands` defaults off.
+    #[test]
+    fn legacy_config_with_removed_fields_loads() {
+        let text = r#"
+            model = "legacy:latest"
+            system_prompt = "keep me"
+            tech_system_prompt = "gone"
+            convo_system_prompt = "gone"
+            [generation]
+            temperature = 0.9
+            [agent]
+            auto_run = true
+        "#;
+        let cfg: Config = toml::from_str(text).expect("legacy config should parse");
+        assert_eq!(cfg.model, "legacy:latest");
+        assert_eq!(cfg.system_prompt, "keep me");
+        assert_eq!(cfg.generation.temperature, 0.9);
+        assert!(cfg.agent.auto_run);
+        assert!(!cfg.agent.run_commands); // new field defaults off
+        assert_eq!(cfg.kind, ProviderKind::Ollama); // new field defaults to Ollama
+    }
+
+    /// The top-level `kind` drives the legacy single-endpoint chat profile, so a
+    /// non-Ollama backend is configurable without a `[providers]` block.
+    #[test]
+    fn legacy_kind_drives_chat_profile() {
+        let cfg = Config {
+            kind: ProviderKind::OpenAiCompat,
+            ..Config::default()
+        };
+        assert_eq!(cfg.chat_profile().kind, ProviderKind::OpenAiCompat);
+    }
+
+    /// `save` then `load` round-trips the fields `gene setup` writes.
+    #[test]
+    fn save_load_round_trips_setup_fields() {
+        let dir =
+            std::env::temp_dir().join(format!("gene-cfg-test-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config {
+            kind: ProviderKind::OpenAiCompat,
+            model: "m1".into(),
+            system_prompt: "sys".into(),
+            ..Config::default()
+        };
+        cfg.agent.run_commands = true;
+        cfg.generation.temperature = 0.25;
+        cfg.save(&path).unwrap();
+
+        let (back, _) = Config::load(Some(&path)).unwrap();
+        assert_eq!(back.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(back.model, "m1");
+        assert_eq!(back.system_prompt, "sys");
+        assert!(back.agent.run_commands);
+        assert_eq!(back.generation.temperature, 0.25);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

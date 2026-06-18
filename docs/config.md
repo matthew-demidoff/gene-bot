@@ -21,13 +21,14 @@ needs the fields you want to change.
 # Legacy single-endpoint fields. Used when [providers] is empty (or as the
 # fallback when a role names a missing provider).
 model    = "huihui_ai/llama3.1-abliterated:latest"   # model tag served by the chat endpoint
-base_url = "http://localhost:11434/v1/chat/completions"
+base_url = "http://localhost:11434/v1/chat/completions"   # chat POSTs here verbatim
 api_key  = "ollama"   # Ollama ignores it; any non-empty string is fine
+kind     = "ollama"   # "ollama" | "openai_compat" — only changes model discovery
+                      # (/api/tags vs /v1/models); chat is OpenAI-compatible for both
 
-# System prompts per persona (see `--mode`).
-system_prompt       = "…"   # assistant mode: instructs the model on the ```run convention
-tech_system_prompt  = "…"   # tech mode: advises, never emits ```run
-convo_system_prompt = "…"   # convo mode: casual conversation
+# System prompt sent before every conversation. Empty (the default) => no system
+# message. You write your own; there are no built-in personas. `gene setup` helps.
+system_prompt = ""
 ```
 
 ## [generation] — sampling
@@ -50,11 +51,12 @@ max_tokens  = 4096
 
 ## [agent] — confirm-gated shell execution
 
-Governs the assistant persona's command execution (a GUI feature; the CLI prints
-suggested commands rather than running them).
+Governs the model's command execution. Off by default; the GUI runs approved
+commands confirm-gated, the CLI only prints suggested commands.
 
 ```toml
 [agent]
+run_commands      = false   # parse ```run blocks from replies (opt in for the shell capability)
 auto_run          = false   # per-session default for auto-running approved commands
 native_tools      = false   # use OpenAI function-calling instead of the ```run convention
 max_tool_rounds   = 8       # cap on tool-call rounds in one user turn

@@ -34,7 +34,7 @@ A two-crate Cargo workspace:
   - `llm/` — the streaming chat client and the incremental `<think>` / ```run
     parser.
   - `provider/` — OpenAI-compatible backends and model discovery (`ProviderKind`).
-  - `chat.rs` — the persona `Mode` and conversation → wire-message conversion.
+  - `chat.rs` — conversation → wire-message conversion (system prompt + messages → OpenAI wire format).
   - `tools/` — confirm-gated shell execution.
   - `model/` + `persist.rs` — conversation and dataset types and storage.
   - `dataset/` — load/stats/dedup/split (`mod.rs`) and format conversion
