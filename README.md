@@ -24,21 +24,24 @@ an open-weight model you choose and run yourself.
 - **Fine-tune** the model on your dataset: LoRA, DoRA, or a full fine-tune, run
   through `mlx_lm` on Apple Silicon. Every step is a configurable command
   template, so the trainer/backend is pluggable without recompiling.
-- **Evaluate** a model against an eval set with a pluggable grader
-  (`exact`, `contains`, or capture-only), fanned out concurrently.
+- **Evaluate & compare** models against an eval set with a pluggable grader
+  (`exact`, `contains`, an LLM `judge`, or capture-only), fanned out
+  concurrently; run the same set across several providers to rank them.
 - **Experiment tracking.** Each training and eval run is recorded under
   `runs/<id>/` with a config snapshot, dataset provenance (content hash), the
   loss-curve metric series, and the raw log.
 - **Multi-provider.** Named `[providers]` profiles (Ollama or any
-  OpenAI-compatible server) mapped to `[roles]` — chat, eval, and judge can each
-  use a different endpoint and model.
+  OpenAI-compatible server). `[roles].chat` picks the chat provider, `eval
+  compare` runs across the providers you name, and an LLM judge uses
+  `[roles].judge` — so chat, the model under eval, and the judge can differ.
 - **GUI + headless CLI.** The default build ships the desktop window; a
   `--no-default-features` build is a lean CLI with no windowing dependencies, for
   scripts, CI, or ssh. Every CLI command supports `--json`.
 
 ## Prerequisites
 
-`gene` **detects** these but never installs them — run `gene doctor` to check.
+`gene` **detects** most of these but never installs them — run `gene doctor` to
+check (it probes the chat host, Python, and `mlx-lm`; not llama.cpp).
 
 | For | Install |
 | --- | --- |
@@ -76,9 +79,9 @@ gene train --dry-run                  # print the exact subprocess commands, run
 gene eval run --set evals/smoke.json --grader contains
 ```
 
-Global flags work on any subcommand: `--config <path>`, `--model <tag>`,
-`--base_url <url>`, `--provider <name>`, and `--json`. The full command reference
-is in [docs/cli.md](docs/cli.md).
+`--provider <name>` and `--json` are global (they work after any subcommand);
+`--config <path>`, `--model <tag>`, and `--base-url <url>` go before the
+subcommand. The full command reference is in [docs/cli.md](docs/cli.md).
 
 ## Configuration
 

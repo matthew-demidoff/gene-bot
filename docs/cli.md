@@ -16,7 +16,7 @@ These precede the subcommand (and `--provider`/`--json` also work after it):
 | --- | --- |
 | `--config <path>` | Use this config file instead of the platform default. |
 | `--model <tag>` | Override the chat model tag (legacy single-endpoint setups). |
-| `--base_url <url>` | Override the chat endpoint base URL (legacy single-endpoint setups). |
+| `--base-url <url>` | Override the chat endpoint base URL (legacy single-endpoint setups). |
 | `--provider <name>` | Use a named `[providers]` profile for this run (overrides `[roles].chat`). |
 | `--json` | Emit machine-readable JSON instead of human-readable text. Errors are emitted as `{"error": "..."}` on stderr with a non-zero exit. |
 
@@ -230,7 +230,8 @@ Run an eval set against the active provider, grade the outputs, and record an
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--set <path>` | (required) | Eval-set JSON file. |
-| `--grader <g>` | `none` | `none` (capture only) \| `exact` \| `contains`. Per-item graders in the set override this. |
+| `--grader <g>` | `none` | `none` (capture only) \| `exact` \| `contains` \| `judge` (LLM judge). Per-item graders override this. |
+| `--judge <profile>` | `[roles].judge` | Provider profile for the `judge` grader; falls back to self-judging with the chat provider. |
 | `--concurrency <n>` | `4` | Maximum concurrent inference requests. |
 
 ```sh
@@ -254,8 +255,34 @@ per-item `grader` are optional):
 ```
 
 `--json` emits the full report (per-item outputs, `passed`, `mean_score`,
-`scored`/`passed` counts) plus the `run_id` it was saved under. The eval also
-writes a `results.jsonl` artifact into the run directory.
+`scored`/`passed`/`errored` counts) plus the `run_id`. Inference or judge errors
+count as `errored` (not failures), so a down provider reads as errored rather
+than a misleading 0.0%. The eval also writes a `results.jsonl` artifact into the
+run directory.
+
+---
+
+## eval compare
+
+Run an eval set across several named `[providers]` profiles and print a
+side-by-side score table — e.g. a fine-tune vs its base. Each model's run is
+recorded as its own `Eval` run.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--set <path>` | (required) | Eval-set JSON file. |
+| `--providers <a,b,…>` | (required) | Comma-separated `[providers]` profile names (≥ 2). |
+| `--grader <g>` | `none` | A scoring grader is required: `exact` \| `contains` \| `judge` (`none` is rejected). |
+| `--judge <profile>` | `[roles].judge` | Judge provider for `--grader judge`. |
+| `--concurrency <n>` | `4` | Maximum concurrent inference requests. |
+
+```sh
+gene eval compare --set evals/smoke.json --providers base,finetuned --grader judge
+```
+
+Providers are resolved up front (an unknown name errors before any run runs).
+`--json` includes each provider's `mean_score`, `passed`/`scored`/`errored`, and
+`run_id`.
 
 ---
 

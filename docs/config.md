@@ -144,9 +144,11 @@ resolved commands without running anything.
 
 ## [providers] and [roles] — multi-provider
 
-`[providers]` defines named inference endpoints; `[roles]` maps each activity
-(chat / eval / judge) to one. When `[providers]` is empty, `gene` uses the
-top-level `model` / `base_url` / `api_key` instead.
+`[providers]` defines named inference endpoints; `[roles]` selects which one each
+activity uses. `[roles].chat` picks the chat provider; `[roles].judge` picks the
+LLM judge for `eval --grader judge`. (`[roles].eval` is reserved — `eval run`
+uses the chat provider, and `eval compare` names its providers explicitly.) When
+`[providers]` is empty, `gene` uses the top-level `model` / `base_url` / `api_key`.
 
 ```toml
 [providers.local]
@@ -158,21 +160,21 @@ model    = "huihui_ai/llama3.1-abliterated:latest"
 [providers.remote]
 kind     = "openai_compat"
 base_url = "https://api.example.com/v1/chat/completions"
-api_key  = "env:OPENAI_API_KEY"                           # read from the environment, not stored in plaintext
+api_key  = "sk-..."                                       # sent verbatim as the bearer token
 model    = "gpt-x"
 
 [roles]
-chat  = "local"    # interactive chat / `gene chat`
-eval  = "local"    # the model under eval
-judge = "remote"   # a stronger model for grading (when used)
+chat  = "local"    # interactive chat / `gene chat` / `eval run`
+judge = "remote"   # LLM judge for `eval --grader judge`
 ```
 
 - `kind` selects model discovery: `ollama` uses `/api/tags`, `openai_compat`
   (aliases: `openai`, `open_ai_compat`) uses `/v1/models`. The chat path itself
   is OpenAI-compatible for both, so this covers Ollama, vLLM, llama.cpp `server`,
   LM Studio, and hosted APIs.
-- `api_key` accepts an `env:VAR` form so secrets stay out of the file. `gene
-  config show` redacts keys regardless.
+- `api_key` is sent verbatim as the bearer token (Ollama ignores it). `gene
+  config show` redacts keys in its output, but they are stored in `config.toml`
+  as written — keep the file private.
 - An unset role falls back to `chat`, then to the first configured provider, then
   to the top-level fields. A `[roles].chat` naming a provider that doesn't exist
   is reported as an error (not silently fallen back) by `gene chat`/`doctor`.
