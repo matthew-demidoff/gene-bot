@@ -43,7 +43,7 @@ pub fn start_training(
     tokio::spawn(async move {
         let store = RunStore::new(runs_dir);
         let hyperparams = serde_json::json!({
-            "method": "lora",
+            "method": cfg.finetune.method,
             "iters": cfg.finetune.iters,
             "batch": cfg.finetune.batch,
             "layers": cfg.finetune.layers,
@@ -118,6 +118,8 @@ async fn run_pipeline(
     run_id: Option<&str>,
     tx: &UnboundedSender<TrainMsg>,
 ) -> Result<(Option<String>, Option<String>)> {
+    // Shared guard: protects the GUI path too (the CLI also checks up front).
+    cfg.finetune.check_method()?;
     let examples = dataset::load(dataset_path)?;
     if examples.len() < cfg.finetune.min_examples {
         bail!(
@@ -135,7 +137,14 @@ async fn run_pipeline(
 
     write_split(&examples, &data_dir, cfg.finetune.valid_fraction)?;
 
-    let vars = template_vars(cfg, &data_dir, &adapters_dir, &fused_dir, work_dir);
+    // A full fine-tune has no adapters to fuse; its adapter-path output is the
+    // model we deploy. LoRA/DoRA fuse into a separate fused dir.
+    let model_dir = if cfg.finetune.needs_fuse() {
+        fused_dir
+    } else {
+        adapters_dir.clone()
+    };
+    let vars = template_vars(cfg, &data_dir, &adapters_dir, &model_dir, work_dir);
 
     run_cmd(
         "train",
@@ -145,16 +154,64 @@ async fn run_pipeline(
         tx,
     )
     .await?;
-    run_cmd(
-        "fuse",
-        &fill(&cfg.finetune.fuse_command, &vars),
-        store,
-        run_id,
-        tx,
-    )
-    .await?;
+    if cfg.finetune.needs_fuse() {
+        run_cmd(
+            "fuse",
+            &fill(&cfg.finetune.fuse_command, &vars),
+            store,
+            run_id,
+            tx,
+        )
+        .await?;
+    }
 
-    deploy(cfg, &fused_dir, work_dir, &vars, store, run_id, tx).await
+    deploy(cfg, &model_dir, work_dir, &vars, store, run_id, tx).await
+}
+
+/// The subprocess commands the pipeline would run, in order, as
+/// `(label, command)` — for `gene train --dry-run` and tests. Runs nothing.
+pub fn planned_commands(cfg: &Config, work_dir: &Path) -> Vec<(String, String)> {
+    let data_dir = work_dir.join("data");
+    let adapters_dir = work_dir.join("adapters");
+    let fused_dir = work_dir.join("fused");
+    let model_dir = if cfg.finetune.needs_fuse() {
+        fused_dir
+    } else {
+        adapters_dir.clone()
+    };
+    let mut vars = template_vars(cfg, &data_dir, &adapters_dir, &model_dir, work_dir);
+    // deploy() injects {modelfile} at deploy time; mirror it so the ollama_gguf
+    // preview isn't left with an unfilled placeholder.
+    vars.push((
+        "modelfile",
+        work_dir.join("Modelfile").display().to_string(),
+    ));
+
+    let mut cmds = vec![(
+        "train".to_string(),
+        fill(&cfg.finetune.train_command, &vars),
+    )];
+    if cfg.finetune.needs_fuse() {
+        cmds.push(("fuse".to_string(), fill(&cfg.finetune.fuse_command, &vars)));
+    }
+    match cfg.finetune.deploy_mode.as_str() {
+        "mlx_server" => cmds.push((
+            "serve".to_string(),
+            fill(&cfg.finetune.mlx_server_command, &vars),
+        )),
+        "ollama_gguf" => {
+            cmds.push((
+                "convert-gguf".to_string(),
+                fill(&cfg.finetune.gguf_convert_command, &vars),
+            ));
+            cmds.push((
+                "ollama-create".to_string(),
+                fill(&cfg.finetune.ollama_create_command, &vars),
+            ));
+        }
+        _ => {}
+    }
+    cmds
 }
 
 /// Write `train.jsonl` / `valid.jsonl` in MLX chat format (messages only).
@@ -213,6 +270,8 @@ fn template_vars(
         ("batch", cfg.finetune.batch.to_string()),
         ("layers", cfg.finetune.layers.to_string()),
         ("lr", cfg.finetune.learning_rate.clone()),
+        ("fine_tune_type", cfg.finetune.method.clone()),
+        ("extra_args", cfg.finetune.extra_args.clone()),
         ("port", cfg.finetune.mlx_server_port.to_string()),
         ("llama_cpp", cfg.finetune.llama_cpp_dir.clone()),
         ("tag", cfg.finetune.ollama_tag.clone()),
@@ -553,5 +612,31 @@ mod tests {
         assert!(train.is_disjoint(&valid));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn planned_commands_reflect_method() {
+        use crate::config::{Config, Finetune};
+        let dir = std::path::Path::new("/tmp/wd");
+
+        let lora = Config::default();
+        let cmds = planned_commands(&lora, dir);
+        let labels: Vec<_> = cmds.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(labels.contains(&"train"));
+        assert!(labels.contains(&"fuse")); // LoRA fuses adapters
+        assert!(cmds[0].1.contains("--fine-tune-type lora"));
+        assert!(!cmds[0].1.contains("{fine_tune_type}")); // placeholder filled
+
+        let full = Config {
+            finetune: Finetune {
+                method: "full".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let cmds = planned_commands(&full, dir);
+        let labels: Vec<_> = cmds.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(!labels.contains(&"fuse")); // full skips fuse
+        assert!(cmds[0].1.contains("--fine-tune-type full"));
     }
 }

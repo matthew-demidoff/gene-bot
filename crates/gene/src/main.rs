@@ -60,6 +60,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DatasetCmd,
     },
+    /// Run a fine-tune (LoRA/DoRA/full) and record it as a tracked run.
+    Train(TrainArgs),
     /// Report whether the chat + fine-tuning prerequisites are installed.
     Doctor,
 }
@@ -150,6 +152,22 @@ enum DatasetCmd {
     },
 }
 
+#[derive(Args)]
+struct TrainArgs {
+    /// Fine-tune method: lora | dora | full.
+    #[arg(long)]
+    method: Option<String>,
+    /// Override the iteration count.
+    #[arg(long)]
+    iters: Option<u32>,
+    /// Override the learning rate.
+    #[arg(long)]
+    learning_rate: Option<String>,
+    /// Print the resolved subprocess commands without running anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     reset_sigpipe();
@@ -204,6 +222,9 @@ async fn main() -> Result<()> {
             }
             DatasetCmd::Snapshot { file } => cli::dataset_snapshot(&cfg, file.file, json),
         },
+        Some(Cmd::Train(a)) => {
+            cli::train(&cfg, a.method, a.iters, a.learning_rate, a.dry_run, json).await
+        }
         Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
         // No subcommand launches the desktop GUI (when this build includes it).
         None => launch_gui(cfg, cfg_path),
