@@ -426,3 +426,65 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_request_uses_legacy_fields_when_no_providers() {
+        let cfg = Config {
+            model: "legacy-model".into(),
+            ..Config::default()
+        };
+        let req = cfg.chat_request(vec![]);
+        assert_eq!(req.model, "legacy-model");
+        assert!(req.stream);
+    }
+
+    #[test]
+    fn chat_request_uses_named_profile_via_role() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "remote".into(),
+            ProviderProfile {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: "https://api.example/v1/chat/completions".into(),
+                api_key: "k".into(),
+                model: "gpt-x".into(),
+            },
+        );
+        let cfg = Config {
+            providers,
+            roles: Roles {
+                chat: Some("remote".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(cfg.chat_request(vec![]).model, "gpt-x");
+    }
+
+    #[test]
+    fn unknown_role_falls_back_to_first_provider() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "only".into(),
+            ProviderProfile {
+                kind: ProviderKind::Ollama,
+                base_url: "x".into(),
+                api_key: String::new(),
+                model: "m-only".into(),
+            },
+        );
+        let cfg = Config {
+            providers,
+            roles: Roles {
+                chat: Some("typo".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(cfg.chat_request(vec![]).model, "m-only");
+    }
+}

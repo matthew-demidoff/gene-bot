@@ -12,6 +12,10 @@ pub struct WireMessage {
 /// Sampling parameters for a chat request. Every field is optional: a `None`
 /// value (or an empty `stop` list) is omitted from the JSON body, so a backend
 /// never sees — and never rejects — a knob the caller didn't set.
+///
+/// Note: `top_k`, `min_p`, and `repetition_penalty` are local-backend extensions
+/// (Ollama, vLLM, llama.cpp). A strict hosted OpenAI-compatible endpoint may
+/// reject them with HTTP 400 if set, so leave them unset for such providers.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Sampling {
     #[serde(skip_serializing_if = "Option::is_none")]

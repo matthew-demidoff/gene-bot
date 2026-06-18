@@ -286,4 +286,28 @@ mod tests {
         assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
         assert_eq!(fnv1a(b"gene"), fnv1a(b"gene"));
     }
+
+    #[test]
+    fn dataset_ref_reads_provenance() {
+        let path =
+            std::env::temp_dir().join(format!("gene-ds-test-{}.jsonl", Uuid::new_v4().simple()));
+        let lines = concat!(
+            r#"{"messages":[{"role":"user","content":"hi"}],"meta":{"conversation_id":"c1","model":"m","created_at":"2026-01-01T00:00:00Z","edited":true,"source":"edit"}}"#,
+            "\n",
+            r#"{"messages":[{"role":"user","content":"hey"}],"meta":{"conversation_id":"c2","model":"m","created_at":"2026-01-01T00:00:00Z","edited":false,"source":"accept"}}"#,
+            "\n",
+        );
+        fs::write(&path, lines).unwrap();
+
+        let d = DatasetRef::from_dataset(&path).unwrap();
+        assert_eq!(d.n_examples, 2);
+        assert_eq!(d.n_edited, 1);
+        assert_eq!(
+            d.source_conversations,
+            vec!["c1".to_string(), "c2".to_string()]
+        );
+        assert!(!d.content_hash.is_empty());
+
+        fs::remove_file(&path).ok();
+    }
 }

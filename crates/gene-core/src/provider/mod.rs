@@ -11,6 +11,16 @@ use tokio::sync::mpsc;
 use crate::llm::types::{ChatChunk, ChatRequest};
 use crate::llm::{StreamEvent, StreamParser};
 
+/// A shared HTTP client with a connection timeout, so an unreachable or stalled
+/// server fails fast at connect time instead of hanging the app. There is no
+/// total-request timeout — streaming chat responses are long-lived by design.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+}
+
 /// Which backend a provider talks to. Determines model discovery; the chat path
 /// is OpenAI-compatible for every kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

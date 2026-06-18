@@ -403,7 +403,9 @@ fn number_after(line: &str, key: &str) -> Option<f64> {
     let token = token.trim_end_matches(|c: char| {
         !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
     });
-    token.parse().ok()
+    // Reject NaN/±inf (e.g. an overflowing "1e999") — a non-finite metric would
+    // serialize to JSON `null` and fail to deserialize back, silently dropping it.
+    token.parse().ok().filter(|v: &f64| v.is_finite())
 }
 
 /// Reduce a metric series to the headline numbers stored on the run record.
@@ -463,6 +465,16 @@ mod tests {
         assert!(parse_mlx_metric("Loading pretrained model").is_none());
         assert!(parse_mlx_metric("train: starting").is_none());
         assert!(parse_mlx_metric("Iter 5: nothing useful here").is_none());
+    }
+
+    #[test]
+    fn rejects_overflow_and_tolerates_whitespace() {
+        // An overflowing exponent parses to inf, which is filtered out, leaving
+        // no usable field.
+        assert!(parse_mlx_metric("Iter 1: Train loss 1e999").is_none());
+        let (step, fields) = parse_mlx_metric("Iter 7:   Train loss   3.0").unwrap();
+        assert_eq!(step, 7);
+        assert!(approx(fields.get("train_loss"), 3.0));
     }
 
     #[test]

@@ -92,11 +92,16 @@ commands before approving.
 ## Development
 
 ```sh
-cargo test     # streaming/parser tests
-cargo clippy
+cargo test --workspace                          # engine + parser tests
+cargo clippy --workspace
+cargo run -p gene-ai                            # launch the GUI (default features)
+cargo build -p gene-ai --no-default-features    # headless CLI, no windowing deps
 ```
 
-Layout: `gui.rs` (egui window + agentic orchestration), `llm/` (streaming client
-+ the incremental `<think>`/```run parser), `tools/` (confirm-gated shell exec),
+Layout: a Cargo workspace. `crates/gene-core/` is the UI-agnostic engine —
+`config`, `llm/` (streaming client + the incremental `<think>`/```run parser),
+`provider/` (OpenAI-compatible backends), `tools/` (confirm-gated shell exec),
 `model/` + `persist.rs` (conversations + dataset), `train.rs` (MLX LoRA
-orchestration). The backend is UI-agnostic — `gui.rs` is the only frontend.
+orchestration), and `runs/` (experiment tracking). `crates/gene/` is the binary:
+the CLI plus the egui frontend (`app.rs`) behind a default `gui` feature, so the
+engine builds with zero GUI dependencies.
