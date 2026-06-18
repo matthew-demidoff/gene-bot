@@ -141,67 +141,63 @@ impl Provider {
         let _ = tx.send(StreamEvent::Done).await;
     }
 
-    /// List available model ids (best-effort; returns empty on any failure).
-    pub async fn list_models(&self) -> Vec<String> {
+    /// The chat endpoint URL (for diagnostics).
+    pub fn endpoint(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The model-discovery URL for this backend (Ollama `/api/tags`,
+    /// OpenAI-compatible `/v1/models`). Empty if the base URL is unusable.
+    fn discovery_url(&self) -> String {
+        let root = self.base_url.split("/v1/").next().unwrap_or_default();
+        if root.is_empty() {
+            return String::new();
+        }
         match self.kind {
-            ProviderKind::Ollama => self.list_models_ollama().await,
-            ProviderKind::OpenAiCompat => self.list_models_openai().await,
+            ProviderKind::Ollama => format!("{root}/api/tags"),
+            ProviderKind::OpenAiCompat => format!("{root}/v1/models"),
         }
     }
 
-    async fn list_models_ollama(&self) -> Vec<String> {
-        let tags_url = self
-            .base_url
-            .split("/v1/")
-            .next()
-            .map(|root| format!("{root}/api/tags"))
-            .unwrap_or_default();
-        if tags_url.is_empty() {
-            return vec![];
+    /// Whether the discovery endpoint responds successfully within 2s — lets
+    /// `doctor` probe the *active* provider rather than a hardcoded URL.
+    pub async fn reachable(&self) -> bool {
+        let url = self.discovery_url();
+        if url.is_empty() {
+            return false;
         }
-        let Ok(resp) = self.http.get(&tags_url).send().await else {
-            return vec![];
-        };
-        let Ok(json) = resp.json::<serde_json::Value>().await else {
-            return vec![];
-        };
-        json.get("models")
-            .and_then(|m| m.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    async fn list_models_openai(&self) -> Vec<String> {
-        let models_url = self
-            .base_url
-            .split("/v1/")
-            .next()
-            .map(|root| format!("{root}/v1/models"))
-            .unwrap_or_default();
-        if models_url.is_empty() {
-            return vec![];
-        }
-        let Ok(resp) = self
-            .http
-            .get(&models_url)
+        self.http
+            .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(std::time::Duration::from_secs(2))
             .send()
             .await
-        else {
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+
+    /// List available model ids (best-effort; returns empty on any failure).
+    pub async fn list_models(&self) -> Vec<String> {
+        let url = self.discovery_url();
+        if url.is_empty() {
+            return vec![];
+        }
+        let Ok(resp) = self.http.get(&url).bearer_auth(&self.api_key).send().await else {
             return vec![];
         };
         let Ok(json) = resp.json::<serde_json::Value>().await else {
             return vec![];
         };
-        json.get("data")
-            .and_then(|d| d.as_array())
+        // Ollama returns {"models":[{"name":...}]}; OpenAI {"data":[{"id":...}]}.
+        let (array_key, name_field) = match self.kind {
+            ProviderKind::Ollama => ("models", "name"),
+            ProviderKind::OpenAiCompat => ("data", "id"),
+        };
+        json.get(array_key)
+            .and_then(|a| a.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
+                    .filter_map(|m| m.get(name_field).and_then(|n| n.as_str()).map(String::from))
                     .collect()
             })
             .unwrap_or_default()

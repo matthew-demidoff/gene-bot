@@ -219,6 +219,22 @@ impl RunStore {
         runs.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         runs
     }
+
+    /// Mark any run still `Running` as `Aborted` — call at startup, where a
+    /// `Running` run means a previous process died mid-run. Returns the count.
+    pub fn reconcile(&self) -> usize {
+        let mut aborted = 0;
+        for mut run in self.list() {
+            if run.status == RunStatus::Running {
+                run.status = RunStatus::Aborted;
+                run.finished_at = Some(Utc::now());
+                if self.save(&run).is_ok() {
+                    aborted += 1;
+                }
+            }
+        }
+        aborted
+    }
 }
 
 /// FNV-1a (64-bit). Stable across releases — unlike `DefaultHasher` — so dataset
