@@ -369,10 +369,20 @@ pub fn dataset_import(
         std::fs::read_to_string(from).with_context(|| format!("reading {}", from.display()))?;
     let mut incoming = dataset::format::import(&text, fmt)?;
     let added = incoming.len();
+    if replace && incoming.is_empty() {
+        bail!(
+            "refusing to replace the dataset with an empty import from {}",
+            from.display()
+        );
+    }
     let mut examples = if replace {
         Vec::new()
+    } else if path.exists() {
+        // Distinguish "no dataset yet" (fine for a first import) from a real
+        // read/parse error, which must abort rather than silently discard data.
+        dataset::load(&path)?
     } else {
-        dataset::load(&path).unwrap_or_default()
+        Vec::new()
     };
     examples.append(&mut incoming);
     dataset::save(&path, &examples)?;

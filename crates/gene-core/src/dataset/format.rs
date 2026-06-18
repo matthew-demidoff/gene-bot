@@ -7,6 +7,7 @@
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::model::dataset::{ChatMsg, Meta, TrainingExample};
 
@@ -30,8 +31,11 @@ impl Format {
     }
 }
 
-/// Import JSONL `text` in `format` into examples. Errors on the first malformed
-/// record (import is all-or-nothing, unlike the tolerant native loader).
+/// Import JSONL `text` in `format` into examples. Errors on the first record
+/// that isn't valid JSON or lacks the expected array; a message missing
+/// `role`/`content` (ShareGPT: `from`/`value`) defaults that field to empty
+/// rather than failing. `mlx` is treated as the OpenAI chat-messages shape —
+/// prompt/completion or plain-text MLX files are not parsed.
 pub fn import(text: &str, format: Format) -> Result<Vec<TrainingExample>> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -75,7 +79,10 @@ fn imported(messages: Vec<ChatMsg>) -> TrainingExample {
     TrainingExample {
         messages,
         meta: Meta {
-            conversation_id: String::new(),
+            // A unique id per imported record: imports carry no conversation
+            // grouping, so each is its own conversation and a later
+            // ByConversation split won't collapse the whole import to one side.
+            conversation_id: format!("import-{}", Uuid::new_v4().simple()),
             model: String::new(),
             created_at: Utc::now(),
             edited: false,

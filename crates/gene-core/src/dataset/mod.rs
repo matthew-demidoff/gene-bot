@@ -11,7 +11,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::hash::fnv1a;
 pub use crate::model::dataset::{ChatMsg, Meta, TrainingExample};
 
 /// Read a JSONL dataset, skipping blank and unparseable lines.
@@ -30,6 +29,9 @@ pub fn parse(text: &str) -> Vec<TrainingExample> {
 }
 
 /// Write examples as JSONL (one object per line), creating parent dirs.
+///
+/// Atomic (tmp-then-rename): a crash or ENOSPC mid-write must not truncate the
+/// existing dataset — the in-place `dedup`/`import` overwrites depend on this.
 pub fn save(path: &Path, examples: &[TrainingExample]) -> Result<()> {
     let mut buf = String::new();
     for ex in examples {
@@ -39,7 +41,14 @@ pub fn save(path: &Path, examples: &[TrainingExample]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(path, buf).with_context(|| format!("writing dataset {}", path.display()))
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("dataset.jsonl");
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    std::fs::write(&tmp, buf).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("finalizing {}", path.display()))?;
+    Ok(())
 }
 
 /// Summary counts for a dataset.
@@ -71,8 +80,9 @@ pub fn stats(examples: &[TrainingExample]) -> Stats {
 }
 
 /// A normalized content key: role-tagged, whitespace-trimmed message text. Case
-/// is preserved (code is case-sensitive).
-fn content_key(messages: &[ChatMsg]) -> u64 {
+/// is preserved (code is case-sensitive). Returns the full string (not a hash)
+/// so dedup is collision-free.
+fn content_key(messages: &[ChatMsg]) -> String {
     let mut buf = String::new();
     for m in messages {
         buf.push_str(&m.role);
@@ -80,7 +90,7 @@ fn content_key(messages: &[ChatMsg]) -> u64 {
         buf.push_str(m.content.trim());
         buf.push('\u{2}');
     }
-    fnv1a(buf.as_bytes())
+    buf
 }
 
 /// Remove examples whose normalized message content duplicates an earlier one.
@@ -124,8 +134,16 @@ pub fn make_split(examples: &[TrainingExample], spec: &SplitSpec) -> Split {
     if n == 0 {
         return Split::default();
     }
-    let valid_target = ((n as f64) * spec.valid).round() as usize;
-    let test_target = ((n as f64) * spec.test).round() as usize;
+    let mut valid_target = ((n as f64) * spec.valid).round() as usize;
+    let mut test_target = ((n as f64) * spec.test).round() as usize;
+    // A positive fraction shouldn't round away to an empty split when there is
+    // data to spare.
+    if spec.valid > 0.0 && valid_target == 0 && n >= 2 {
+        valid_target = 1;
+    }
+    if spec.test > 0.0 && test_target == 0 && n.saturating_sub(valid_target) >= 1 {
+        test_target = 1;
+    }
 
     match spec.strategy {
         SplitStrategy::Random { seed } => {
@@ -254,8 +272,10 @@ mod tests {
         };
         let train_convs = conv(&split.train);
         let valid_convs = conv(&split.valid);
-        // No conversation appears on both sides.
+        // No conversation appears on both sides, and neither side is empty.
         assert!(train_convs.is_disjoint(&valid_convs));
+        assert!(!split.train.is_empty());
+        assert!(!split.valid.is_empty());
         assert_eq!(split.train.len() + split.valid.len(), data.len());
     }
 
@@ -271,5 +291,31 @@ mod tests {
         let b = make_split(&data, &spec);
         assert_eq!(a.valid, b.valid);
         assert_eq!(a.valid.len(), 2);
+    }
+
+    #[test]
+    fn tiny_valid_fraction_still_holds_out_one() {
+        // n = 3, valid 0.1 rounds to 0 — but a positive fraction must hold out
+        // at least one example rather than yield an empty validation set.
+        let data: Vec<_> = (0..3).map(|i| ex(&format!("c{i}"), "x")).collect();
+        let split = make_split(
+            &data,
+            &SplitSpec {
+                strategy: SplitStrategy::Random { seed: 1 },
+                valid: 0.1,
+                test: 0.0,
+            },
+        );
+        assert_eq!(split.valid.len(), 1);
+        assert_eq!(split.train.len(), 2);
+    }
+
+    #[test]
+    fn dedup_keeps_first_occurrence() {
+        let mut data = vec![ex("a", "dup"), ex("b", "dup"), ex("c", "unique")];
+        assert_eq!(dedup(&mut data), 1);
+        // The first "dup" (conversation a) is kept; the second (b) is dropped.
+        assert_eq!(data[0].meta.conversation_id, "a");
+        assert_eq!(data[1].meta.conversation_id, "c");
     }
 }

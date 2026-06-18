@@ -497,4 +497,61 @@ mod tests {
         assert!(approx(summary.get("final_val_loss"), 2.3));
         assert!(approx(summary.get("min_val_loss"), 2.0));
     }
+
+    fn sft(conversation: &str, content: &str) -> TrainingExample {
+        use crate::dataset::{ChatMsg, Meta};
+        TrainingExample {
+            messages: vec![ChatMsg {
+                role: "user".into(),
+                content: content.into(),
+            }],
+            meta: Meta {
+                conversation_id: conversation.into(),
+                model: "m".into(),
+                created_at: Utc::now(),
+                edited: false,
+                source: "test".into(),
+                original_assistant: None,
+            },
+        }
+    }
+
+    #[test]
+    fn write_split_keeps_conversations_whole() {
+        let dir =
+            std::env::temp_dir().join(format!("gene-split-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 4 conversations, 2 examples each, interleaved; content encodes the conv.
+        let mut examples = Vec::new();
+        for round in 0..2 {
+            for conv in ["a", "b", "c", "d"] {
+                examples.push(sft(conv, &format!("{conv}-{round}")));
+            }
+        }
+        write_split(&examples, &dir, 0.25).unwrap();
+
+        let convs = |file: &str| -> std::collections::BTreeSet<char> {
+            std::fs::read_to_string(dir.join(file))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| {
+                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                    v["messages"][0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .chars()
+                        .next()
+                        .unwrap()
+                })
+                .collect()
+        };
+        let train = convs("train.jsonl");
+        let valid = convs("valid.jsonl");
+        assert!(!train.is_empty() && !valid.is_empty());
+        // No conversation lands in both train and valid.
+        assert!(train.is_disjoint(&valid));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
