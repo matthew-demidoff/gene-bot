@@ -55,6 +55,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Manage the training dataset.
+    Dataset {
+        #[command(subcommand)]
+        cmd: DatasetCmd,
+    },
     /// Report whether the chat + fine-tuning prerequisites are installed.
     Doctor,
 }
@@ -89,6 +94,60 @@ enum ConfigCmd {
     Path,
     /// Print the current configuration.
     Show,
+}
+
+#[derive(Args)]
+struct DatasetFile {
+    /// Dataset JSONL file (defaults to the configured dataset path).
+    #[arg(long)]
+    file: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum DatasetCmd {
+    /// Summary counts for the dataset.
+    Stats {
+        #[command(flatten)]
+        file: DatasetFile,
+    },
+    /// Remove duplicate examples (by normalized content).
+    Dedup {
+        #[command(flatten)]
+        file: DatasetFile,
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Import examples from another format (appends unless --replace).
+    Import {
+        #[command(flatten)]
+        file: DatasetFile,
+        /// Source file to read.
+        #[arg(long)]
+        from: PathBuf,
+        /// Source format: gene | mlx | openai | sharegpt.
+        #[arg(long, default_value = "openai")]
+        format: String,
+        /// Replace the dataset instead of appending.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Export the dataset to another format.
+    Export {
+        #[command(flatten)]
+        file: DatasetFile,
+        /// Destination file.
+        #[arg(long)]
+        to: PathBuf,
+        /// Target format: gene | mlx | openai | sharegpt.
+        #[arg(long, default_value = "mlx")]
+        format: String,
+    },
+    /// Write an immutable, content-addressed snapshot of the dataset.
+    Snapshot {
+        #[command(flatten)]
+        file: DatasetFile,
+    },
 }
 
 #[tokio::main]
@@ -128,6 +187,22 @@ async fn main() -> Result<()> {
         Some(Cmd::Config { cmd }) => match cmd {
             ConfigCmd::Path => cli::config_path(&cfg_path),
             ConfigCmd::Show => cli::config_show(&cfg, json),
+        },
+        Some(Cmd::Dataset { cmd }) => match cmd {
+            DatasetCmd::Stats { file } => cli::dataset_stats(&cfg, file.file, json),
+            DatasetCmd::Dedup { file, dry_run } => {
+                cli::dataset_dedup(&cfg, file.file, dry_run, json)
+            }
+            DatasetCmd::Import {
+                file,
+                from,
+                format,
+                replace,
+            } => cli::dataset_import(&cfg, file.file, &from, &format, replace, json),
+            DatasetCmd::Export { file, to, format } => {
+                cli::dataset_export(&cfg, file.file, &to, &format, json)
+            }
+            DatasetCmd::Snapshot { file } => cli::dataset_snapshot(&cfg, file.file, json),
         },
         Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
         // No subcommand launches the desktop GUI (when this build includes it).
