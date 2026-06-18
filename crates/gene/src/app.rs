@@ -11,6 +11,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 
+use gene_core::chat::Mode;
 use gene_core::config::Config;
 use gene_core::llm::{StreamEvent, WireMessage};
 use gene_core::model::{Conversation, Message, Role, TrainingExample};
@@ -33,24 +34,6 @@ const TRAIN_LOG_MAX: usize = 200;
 
 /// A saved-conversation list entry: (id, title, updated_at).
 type ConvEntry = (String, String, String);
-
-/// Which persona/behavior the assistant uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Assistant,
-    Tech,
-    Convo,
-}
-
-impl Mode {
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Assistant => "assistant (runs commands)",
-            Mode::Tech => "tech-guy (talks, no commands)",
-            Mode::Convo => "convo (casual chat)",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Busy {
@@ -126,6 +109,7 @@ impl GuiApp {
         let dataset_path = config.dataset_path().unwrap_or_default();
         let work_dir = config.work_dir().unwrap_or_default();
         let runs_dir = config.runs_dir().unwrap_or_default();
+        gene_core::runs::RunStore::new(runs_dir.clone()).reconcile();
         let auto_run = config.agent.auto_run;
         let conversations = persist::list_conversations(&conversations_dir);
 
@@ -166,41 +150,12 @@ impl GuiApp {
     }
 
     fn effective_system_prompt(&self) -> String {
-        match self.mode {
-            Mode::Assistant => self.conv.system_prompt.clone(),
-            Mode::Tech => self.config.tech_system_prompt.clone(),
-            Mode::Convo => self.config.convo_system_prompt.clone(),
-        }
+        self.mode
+            .system_prompt(&self.config, &self.conv.system_prompt)
     }
 
     fn build_wire(&self) -> Vec<WireMessage> {
-        let mut wire = vec![WireMessage {
-            role: "system".into(),
-            content: self.effective_system_prompt(),
-        }];
-        for m in &self.conv.messages {
-            if m.content.trim().is_empty() {
-                continue;
-            }
-            let (role, content) = match m.role {
-                Role::System => continue,
-                Role::User => ("user", m.content.clone()),
-                Role::Assistant => ("assistant", m.content.clone()),
-                Role::Tool => (
-                    "user",
-                    format!(
-                        "[output of `{}`]\n{}",
-                        m.command.as_deref().unwrap_or(""),
-                        m.content
-                    ),
-                ),
-            };
-            wire.push(WireMessage {
-                role: role.into(),
-                content,
-            });
-        }
-        wire
+        gene_core::chat::build_wire(&self.effective_system_prompt(), &self.conv.messages)
     }
 
     fn submit_input(&mut self) {
@@ -222,7 +177,7 @@ impl GuiApp {
 
         let provider = self.config.chat_provider(self.http.clone());
         let request = self.config.chat_request(wire);
-        let detect = self.mode == Mode::Assistant;
+        let detect = self.mode.detect_commands();
         let app_tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let handle = self.rt.spawn(async move {

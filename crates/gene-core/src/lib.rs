@@ -6,7 +6,9 @@
 //! This crate is UI-agnostic — frontends (the `gene` CLI, the egui GUI) build on
 //! top of it and share all logic through these modules.
 
+pub mod chat;
 pub mod config;
+pub mod doctor;
 pub mod llm;
 pub mod model;
 pub mod persist;

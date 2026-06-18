@@ -425,6 +425,20 @@ impl Config {
             sampling: self.generation.to_sampling(),
         }
     }
+
+    /// The model id of the active chat profile (for display/diagnostics).
+    pub fn chat_model(&self) -> String {
+        self.chat_profile().model
+    }
+
+    /// Whether `roles.chat` names a provider that doesn't exist. The CLI can
+    /// surface this as an error instead of silently falling back.
+    pub fn chat_role_is_dangling(&self) -> bool {
+        match self.roles.chat.as_deref() {
+            Some(name) => !self.providers.contains_key(name),
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -486,5 +500,18 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(cfg.chat_request(vec![]).model, "m-only");
+    }
+
+    #[test]
+    fn dangling_chat_role_detected() {
+        let dangling = Config {
+            roles: Roles {
+                chat: Some("nope".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert!(dangling.chat_role_is_dangling());
+        assert!(!Config::default().chat_role_is_dangling());
     }
 }

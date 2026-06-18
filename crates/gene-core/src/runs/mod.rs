@@ -219,6 +219,28 @@ impl RunStore {
         runs.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         runs
     }
+
+    /// Mark any run still `Running` as `Aborted` — call at startup, where a
+    /// `Running` run means a previous process died mid-run. Returns the count.
+    ///
+    /// Assumes a single running instance: a concurrent live run would be
+    /// false-aborted, though it self-heals when that run next saves its status.
+    pub fn reconcile(&self) -> usize {
+        let mut aborted = 0;
+        for mut run in self.list() {
+            if run.status == RunStatus::Running {
+                run.status = RunStatus::Aborted;
+                run.finished_at = Some(Utc::now());
+                if run.error.is_none() {
+                    run.error = Some("process exited before the run finished".into());
+                }
+                if self.save(&run).is_ok() {
+                    aborted += 1;
+                }
+            }
+        }
+        aborted
+    }
 }
 
 /// FNV-1a (64-bit). Stable across releases — unlike `DefaultHasher` — so dataset
@@ -309,5 +331,31 @@ mod tests {
         assert!(!d.content_hash.is_empty());
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn reconcile_aborts_only_stale_running() {
+        let root = temp_root();
+        let store = RunStore::new(root.clone());
+
+        let stale = store
+            .create(RunKind::Train, "m".into(), serde_json::json!({}), None)
+            .unwrap();
+        let mut finished = store
+            .create(RunKind::Eval, "m".into(), serde_json::json!({}), None)
+            .unwrap();
+        finished.status = RunStatus::Succeeded;
+        store.save(&finished).unwrap();
+
+        assert_eq!(store.reconcile(), 1);
+        let stale = store.load(&stale.id).unwrap();
+        assert_eq!(stale.status, RunStatus::Aborted);
+        assert!(stale.error.is_some());
+        assert_eq!(
+            store.load(&finished.id).unwrap().status,
+            RunStatus::Succeeded
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 }

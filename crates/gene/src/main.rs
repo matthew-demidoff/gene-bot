@@ -3,15 +3,15 @@
 //! egui desktop frontend; all engine logic lives in the `gene-core` library.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use gene_core::config::Config;
 
 #[cfg(feature = "gui")]
 mod app;
+mod cli;
 
 #[derive(Parser)]
 #[command(
@@ -23,24 +23,77 @@ struct Cli {
     /// Path to a config file (defaults to the platform config dir).
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Override the model tag.
+    /// Override the model tag (legacy single-endpoint setups).
     #[arg(long)]
     model: Option<String>,
-    /// Override the chat endpoint base URL.
+    /// Override the chat endpoint base URL (legacy single-endpoint setups).
     #[arg(long)]
     base_url: Option<String>,
+    /// Use a named provider profile for this run (overrides [roles].chat).
+    #[arg(long, global = true)]
+    provider: Option<String>,
+    /// Emit machine-readable JSON instead of human-readable text.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Chat with the model (one-shot via --message, or piped on stdin).
+    Chat(ChatArgs),
+    /// List models available from the active provider.
+    Models,
+    /// Inspect tracked training/eval runs.
+    Run {
+        #[command(subcommand)]
+        cmd: RunCmd,
+    },
+    /// Show or locate the configuration.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Report whether the chat + fine-tuning prerequisites are installed.
     Doctor,
 }
 
+#[derive(Args)]
+struct ChatArgs {
+    /// The prompt. If omitted, the prompt is read from stdin.
+    #[arg(short, long)]
+    message: Option<String>,
+    /// Persona: assistant | tech | convo.
+    #[arg(long, default_value = "tech")]
+    mode: String,
+    #[arg(long)]
+    temperature: Option<f64>,
+    #[arg(long)]
+    max_tokens: Option<u32>,
+    #[arg(long)]
+    seed: Option<u64>,
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    /// List all runs, newest first.
+    List,
+    /// Show one run by id.
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the config file path.
+    Path,
+    /// Print the current configuration.
+    Show,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    reset_sigpipe();
     let cli = Cli::parse();
     let (mut cfg, cfg_path) = Config::load(cli.config.as_deref())?;
     if let Some(m) = cli.model {
@@ -49,13 +102,66 @@ async fn main() -> Result<()> {
     if let Some(u) = cli.base_url {
         cfg.base_url = u;
     }
+    if let Some(p) = cli.provider {
+        cfg.roles.chat = Some(p);
+    }
+    let json = cli.json;
 
-    match cli.command {
-        Some(Cmd::Doctor) => doctor(&cfg).await,
+    let result = match cli.command {
+        Some(Cmd::Chat(a)) => {
+            cli::chat(
+                &cfg,
+                &a.mode,
+                a.message,
+                a.temperature,
+                a.max_tokens,
+                a.seed,
+                json,
+            )
+            .await
+        }
+        Some(Cmd::Models) => cli::models(&cfg, json).await,
+        Some(Cmd::Run { cmd }) => match cmd {
+            RunCmd::List => cli::run_list(&cfg, json),
+            RunCmd::Show { id } => cli::run_show(&cfg, &id, json),
+        },
+        Some(Cmd::Config { cmd }) => match cmd {
+            ConfigCmd::Path => cli::config_path(&cfg_path),
+            ConfigCmd::Show => cli::config_show(&cfg, json),
+        },
+        Some(Cmd::Doctor) => cli::doctor(&cfg, json).await,
         // No subcommand launches the desktop GUI (when this build includes it).
         None => launch_gui(cfg, cfg_path),
+    };
+
+    // With --json, surface errors as JSON on stderr (consistent machine-readable
+    // contract) and exit non-zero; otherwise let anyhow render them as text.
+    match result {
+        Err(e) if json => {
+            let obj = serde_json::json!({ "error": format!("{e:#}") });
+            eprintln!(
+                "{}",
+                serde_json::to_string(&obj).unwrap_or_else(|_| format!("{{\"error\":\"{e}\"}}"))
+            );
+            std::process::exit(1);
+        }
+        other => other,
     }
 }
+
+/// Restore the default SIGPIPE disposition so `gene … | head` (and other closed
+/// pipes) terminate cleanly instead of panicking on a failed stdout write.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: resetting a signal to its default handler before any threads rely
+    // on a custom disposition is sound.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
 
 #[cfg(feature = "gui")]
 fn launch_gui(cfg: Config, cfg_path: PathBuf) -> Result<()> {
@@ -86,7 +192,7 @@ fn launch_gui(cfg: Config, cfg_path: PathBuf) -> Result<()> {
 fn launch_gui(_cfg: Config, _cfg_path: PathBuf) -> Result<()> {
     anyhow::bail!(
         "this build has no GUI (compiled with `--no-default-features`); \
-         run a subcommand such as `gene doctor`"
+         run a subcommand such as `gene doctor` or `gene chat`"
     )
 }
 
@@ -112,99 +218,4 @@ fn init_tracing(cfg: &Config) {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .try_init();
-}
-
-async fn doctor(cfg: &Config) -> Result<()> {
-    println!("gene doctor — prerequisite check\n");
-
-    line(arch_is_arm64(), "Apple Silicon (arm64)", &arch_string());
-
-    let ollama = cmd_version("ollama", &["--version"]);
-    line(
-        ollama.is_some(),
-        "ollama (chat host)",
-        ollama
-            .as_deref()
-            .unwrap_or("not found — https://ollama.com"),
-    );
-
-    let reachable = ollama_reachable(&cfg.base_url).await;
-    line(
-        reachable,
-        "ollama server reachable",
-        if reachable {
-            &cfg.base_url
-        } else {
-            "not reachable (run `ollama serve`)"
-        },
-    );
-
-    let py = cmd_version("python3", &["--version"]);
-    line(
-        py.is_some(),
-        "python3 (for MLX)",
-        py.as_deref().unwrap_or("not found"),
-    );
-
-    let mlx = cmd_version(
-        "python3",
-        &[
-            "-c",
-            "import mlx_lm; print(getattr(mlx_lm,'__version__','?'))",
-        ],
-    );
-    line(
-        mlx.is_some(),
-        "mlx-lm (LoRA trainer)",
-        mlx.as_deref().unwrap_or("not found — `pip install mlx-lm`"),
-    );
-
-    println!("\nchat model: {}", cfg.model);
-    println!("mlx base:   {}", cfg.finetune.mlx_base);
-    println!("dataset:    {}", cfg.dataset_path()?.display());
-    Ok(())
-}
-
-fn line(ok: bool, name: &str, detail: &str) {
-    let mark = if ok { "✓" } else { "✗" };
-    println!("[{mark}] {name:<26} {detail}");
-}
-
-fn cmd_version(bin: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(bin).args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        s = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    }
-    s.lines().next().map(|l| l.to_string())
-}
-
-fn arch_string() -> String {
-    cmd_version("uname", &["-m"]).unwrap_or_else(|| "unknown".into())
-}
-
-fn arch_is_arm64() -> bool {
-    arch_string().contains("arm64")
-}
-
-async fn ollama_reachable(base_url: &str) -> bool {
-    let tags_url = base_url
-        .split("/v1/")
-        .next()
-        .map(|root| format!("{root}/api/tags"))
-        .unwrap_or_default();
-    if tags_url.is_empty() {
-        return false;
-    }
-    let client = reqwest::Client::new();
-    client
-        .get(&tags_url)
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
 }
