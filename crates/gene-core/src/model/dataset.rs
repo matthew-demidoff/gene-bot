@@ -65,7 +65,10 @@ impl TrainingExample {
             if content.trim().is_empty() {
                 continue;
             }
-            messages.push(ChatMsg { role: role.into(), content });
+            messages.push(ChatMsg {
+                role: role.into(),
+                content,
+            });
         }
 
         Some(TrainingExample {
@@ -75,7 +78,11 @@ impl TrainingExample {
                 model: conv.model.clone(),
                 created_at: Utc::now(),
                 edited: target.edited,
-                source: if target.edited { "edit".into() } else { "accept".into() },
+                source: if target.edited {
+                    "edit".into()
+                } else {
+                    "accept".into()
+                },
                 original_assistant: target.original_content.clone(),
             },
         })

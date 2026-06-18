@@ -128,7 +128,10 @@ impl Default for Config {
 
 impl Default for Generation {
     fn default() -> Self {
-        Generation { temperature: 0.7, max_tokens: 4096 }
+        Generation {
+            temperature: 0.7,
+            max_tokens: 4096,
+        }
     }
 }
 
@@ -140,8 +143,16 @@ impl Default for Agent {
             max_tool_rounds: 8,
             exec_timeout_secs: 30,
             denylist: [
-                "rm -rf", "sudo", "mkfs", "dd ", ":(){", "> /dev/", "shutdown",
-                "diskutil erase", "mv /", "chmod -R 000",
+                "rm -rf",
+                "sudo",
+                "mkfs",
+                "dd ",
+                ":(){",
+                "> /dev/",
+                "shutdown",
+                "diskutil erase",
+                "mv /",
+                "chmod -R 000",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -152,7 +163,9 @@ impl Default for Agent {
 
 impl Default for Ui {
     fn default() -> Self {
-        Ui { think_collapsed_default: true }
+        Ui {
+            think_collapsed_default: true,
+        }
     }
 }
 

@@ -15,5 +15,7 @@ pub struct ToolCall {
 /// True if the command matches any denylist substring. Denylisted commands
 /// always require a manual confirm, even when auto-run is on.
 pub fn is_denied(command: &str, denylist: &[String]) -> bool {
-    denylist.iter().any(|d| !d.is_empty() && command.contains(d.as_str()))
+    denylist
+        .iter()
+        .any(|d| !d.is_empty() && command.contains(d.as_str()))
 }

@@ -97,14 +97,20 @@ fn init_tracing(cfg: &Config) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
         return;
     };
     let make_writer = move || file.try_clone().expect("clone log file handle");
     let _ = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(make_writer)
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .try_init();
 }
 
@@ -117,22 +123,35 @@ async fn doctor(cfg: &Config) -> Result<()> {
     line(
         ollama.is_some(),
         "ollama (chat host)",
-        ollama.as_deref().unwrap_or("not found — https://ollama.com"),
+        ollama
+            .as_deref()
+            .unwrap_or("not found — https://ollama.com"),
     );
 
     let reachable = ollama_reachable(&cfg.base_url).await;
     line(
         reachable,
         "ollama server reachable",
-        if reachable { &cfg.base_url } else { "not reachable (run `ollama serve`)" },
+        if reachable {
+            &cfg.base_url
+        } else {
+            "not reachable (run `ollama serve`)"
+        },
     );
 
     let py = cmd_version("python3", &["--version"]);
-    line(py.is_some(), "python3 (for MLX)", py.as_deref().unwrap_or("not found"));
+    line(
+        py.is_some(),
+        "python3 (for MLX)",
+        py.as_deref().unwrap_or("not found"),
+    );
 
     let mlx = cmd_version(
         "python3",
-        &["-c", "import mlx_lm; print(getattr(mlx_lm,'__version__','?'))"],
+        &[
+            "-c",
+            "import mlx_lm; print(getattr(mlx_lm,'__version__','?'))",
+        ],
     );
     line(
         mlx.is_some(),
