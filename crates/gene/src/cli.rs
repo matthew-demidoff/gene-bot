@@ -14,6 +14,7 @@ use gene_core::llm::StreamEvent;
 use gene_core::model::{Message, Role};
 use gene_core::provider::http_client;
 use gene_core::runs::{DatasetRef, RunStore};
+use gene_core::train::{self, TrainMsg};
 
 fn parse_mode(s: &str) -> Result<Mode> {
     match s {
@@ -460,6 +461,116 @@ pub fn dataset_snapshot(cfg: &Config, file: Option<PathBuf>, json: bool) -> Resu
             dref.n_examples,
             dest.display()
         );
+    }
+    Ok(())
+}
+
+pub async fn train(
+    cfg: &Config,
+    method: Option<String>,
+    iters: Option<u32>,
+    learning_rate: Option<String>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let mut cfg = cfg.clone();
+    if let Some(m) = method {
+        match m.as_str() {
+            "lora" | "dora" | "full" => cfg.finetune.method = m,
+            other => bail!("unknown method '{other}' (lora | dora | full)"),
+        }
+    }
+    if let Some(i) = iters {
+        cfg.finetune.iters = i;
+    }
+    if let Some(lr) = learning_rate {
+        cfg.finetune.learning_rate = lr;
+    }
+    // A pre-0.2 config hardcodes --fine-tune-type in its train_command, so a
+    // non-LoRA method would skip fuse yet still train LoRA — refuse rather than
+    // silently do the wrong thing.
+    if cfg.finetune.method != "lora" && !cfg.finetune.train_command.contains("{fine_tune_type}") {
+        bail!(
+            "the configured train_command hardcodes --fine-tune-type and won't honor \
+             method '{}' — add the {{fine_tune_type}} placeholder (see the default config)",
+            cfg.finetune.method
+        );
+    }
+    let work_dir = cfg.work_dir()?;
+
+    if dry_run {
+        let cmds = train::planned_commands(&cfg, &work_dir);
+        if json {
+            let arr: Vec<_> = cmds
+                .iter()
+                .map(|(l, c)| serde_json::json!({ "label": l, "command": c }))
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "method": cfg.finetune.method, "commands": arr })
+                )?
+            );
+        } else {
+            println!(
+                "method: {}  (dry run — nothing executed)\n",
+                cfg.finetune.method
+            );
+            for (label, command) in cmds {
+                println!("# {label}\n{command}\n");
+            }
+        }
+        return Ok(());
+    }
+
+    let dataset_path = cfg.dataset_path()?;
+    let runs_dir = cfg.runs_dir()?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TrainMsg>();
+    train::start_training(cfg.clone(), work_dir, dataset_path, runs_dir, tx);
+
+    let mut ok = false;
+    let mut message = String::new();
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            // Progress goes to stderr so stdout carries only the final result.
+            TrainMsg::Log(line) => {
+                if !json {
+                    eprintln!("{line}");
+                }
+            }
+            TrainMsg::Metric(m) => {
+                if !json {
+                    let fields = m
+                        .fields
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v:.4}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!("  [iter {}] {fields}", m.step);
+                }
+            }
+            TrainMsg::Done {
+                ok: done_ok,
+                message: msg,
+                ..
+            } => {
+                ok = done_ok;
+                message = msg;
+                break;
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "ok": ok, "message": message }))?
+        );
+    } else {
+        println!("{message}");
+    }
+    if !ok {
+        bail!("{message}");
     }
     Ok(())
 }

@@ -120,9 +120,15 @@ pub struct Finetune {
     pub batch: u32,
     pub layers: u32,
     pub learning_rate: String,
+    /// Fine-tune method: "lora" | "dora" | "full". Sets {fine_tune_type}; "full"
+    /// trains all weights and skips the fuse step.
+    pub method: String,
+    /// Extra arguments appended to the train command (the {extra_args} slot).
+    pub extra_args: String,
 
     /// Command templates. Placeholders: {base} {data} {adapters} {fused}
-    /// {iters} {batch} {layers} {lr} {port} {llama_cpp} {tag} {modelfile}
+    /// {iters} {batch} {layers} {lr} {fine_tune_type} {extra_args} {port}
+    /// {llama_cpp} {tag} {modelfile}
     pub train_command: String,
     pub fuse_command: String,
     pub mlx_server_command: String,
@@ -271,10 +277,12 @@ impl Default for Finetune {
             batch: 1,
             layers: 16,
             learning_rate: "1e-5".into(),
+            method: "lora".into(),
+            extra_args: String::new(),
             train_command: "python3 -m mlx_lm.lora --model {base} --train --data {data} \
-                --adapter-path {adapters} --fine-tune-type lora --num-layers {layers} \
+                --adapter-path {adapters} --fine-tune-type {fine_tune_type} --num-layers {layers} \
                 --batch-size {batch} --iters {iters} --learning-rate {lr} --mask-prompt \
-                --grad-checkpoint --steps-per-report 10 --save-every 100"
+                --grad-checkpoint --steps-per-report 10 --save-every 100 {extra_args}"
                 .into(),
             fuse_command: "python3 -m mlx_lm.fuse --model {base} --adapter-path {adapters} \
                 --save-path {fused}"
@@ -287,6 +295,14 @@ impl Default for Finetune {
             llama_cpp_dir: String::new(),
             ollama_tag: "gene-assistant:latest".into(),
         }
+    }
+}
+
+impl Finetune {
+    /// Whether a fuse step is needed: LoRA/DoRA produce adapters to merge into
+    /// the base; a full fine-tune already produces complete weights.
+    pub fn needs_fuse(&self) -> bool {
+        self.method != "full"
     }
 }
 
