@@ -90,7 +90,14 @@ impl Conversation {
 
     pub fn push(&mut self, msg: Message) -> usize {
         if matches!(msg.role, Role::User) && self.title == "new conversation" {
-            self.title = msg.content.lines().next().unwrap_or("").chars().take(60).collect();
+            self.title = msg
+                .content
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect();
         }
         self.messages.push(msg);
         self.updated_at = Utc::now();

@@ -175,14 +175,22 @@ async fn deploy(
                 .spawn()
                 .map_err(|e| anyhow!("failed to start mlx server: {e}"))?;
 
-            let base_url = format!("http://localhost:{}/v1/chat/completions", cfg.finetune.mlx_server_port);
+            let base_url = format!(
+                "http://localhost:{}/v1/chat/completions",
+                cfg.finetune.mlx_server_port
+            );
             Ok((Some(base_url), Some(fused_dir.display().to_string())))
         }
         "ollama_gguf" => {
             if cfg.finetune.llama_cpp_dir.is_empty() {
                 bail!("deploy_mode=ollama_gguf needs finetune.llama_cpp_dir set in config");
             }
-            run_cmd("convert-gguf", &fill(&cfg.finetune.gguf_convert_command, vars), tx).await?;
+            run_cmd(
+                "convert-gguf",
+                &fill(&cfg.finetune.gguf_convert_command, vars),
+                tx,
+            )
+            .await?;
 
             let gguf = fused_dir.join("model-f16.gguf");
             let modelfile = work_dir.join("Modelfile");

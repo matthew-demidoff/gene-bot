@@ -1344,26 +1344,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "gene"
-version = "0.1.0"
+name = "gene-ai"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "eframe",
+ "egui",
+ "gene-core",
+ "reqwest",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "gene-core"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
- "clap",
  "directories",
- "eframe",
- "egui",
  "eventsource-stream",
  "futures-util",
  "reqwest",
  "serde",
  "serde_json",
  "shell-words",
- "thiserror 2.0.18",
  "tokio",
  "toml",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

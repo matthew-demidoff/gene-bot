@@ -1,0 +1,21 @@
+[package]
+name = "gene-core"
+description = "Core engine for gene: LLM streaming client + parser, agentic shell tools, conversation/dataset model, persistence, and the MLX LoRA training pipeline."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+eventsource-stream.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true
+toml.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+shell-words.workspace = true
+uuid.workspace = true

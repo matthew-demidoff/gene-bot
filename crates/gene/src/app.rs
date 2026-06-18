@@ -10,12 +10,12 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
 
-use crate::config::Config;
-use crate::llm::{run_stream, StreamEvent, WireMessage};
-use crate::model::{Conversation, Message, Role, TrainingExample};
-use crate::tools::{self, run_command, ExecResult};
-use crate::train::{self, TrainMsg};
-use crate::{llm, persist};
+use gene_core::config::Config;
+use gene_core::llm::{run_stream, StreamEvent, WireMessage};
+use gene_core::model::{Conversation, Message, Role, TrainingExample};
+use gene_core::tools::{self, run_command, ExecResult};
+use gene_core::train::{self, TrainMsg};
+use gene_core::{llm, persist};
 
 const USER: Color32 = Color32::from_rgb(120, 190, 255);
 const ASSISTANT: Color32 = Color32::from_rgb(140, 220, 150);
@@ -181,10 +181,17 @@ impl GuiApp {
                 Role::Assistant => ("assistant", m.content.clone()),
                 Role::Tool => (
                     "user",
-                    format!("[output of `{}`]\n{}", m.command.as_deref().unwrap_or(""), m.content),
+                    format!(
+                        "[output of `{}`]\n{}",
+                        m.command.as_deref().unwrap_or(""),
+                        m.content
+                    ),
                 ),
             };
-            wire.push(WireMessage { role: role.into(), content });
+            wire.push(WireMessage {
+                role: role.into(),
+                content,
+            });
         }
         wire
     }
@@ -307,7 +314,8 @@ impl GuiApp {
                 AppEvent::Stream(s) => self.on_stream(s),
                 AppEvent::Exec(res) => {
                     let feedback = res.as_feedback();
-                    self.conv.push(Message::tool(res.command, feedback, res.exit_code));
+                    self.conv
+                        .push(Message::tool(res.command, feedback, res.exit_code));
                     self.tool_rounds += 1;
                     self.continue_or_idle();
                 }
@@ -363,7 +371,12 @@ impl GuiApp {
                     self.train_log.remove(0);
                 }
             }
-            TrainMsg::Done { ok, message, new_base_url, new_model } => {
+            TrainMsg::Done {
+                ok,
+                message,
+                new_base_url,
+                new_model,
+            } => {
                 self.busy = Busy::Idle;
                 self.status = message;
                 if ok {
@@ -543,7 +556,11 @@ impl GuiApp {
                 egui::ComboBox::from_id_salt("mode")
                     .selected_text(self.mode.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.mode, Mode::Assistant, Mode::Assistant.label());
+                        ui.selectable_value(
+                            &mut self.mode,
+                            Mode::Assistant,
+                            Mode::Assistant.label(),
+                        );
                         ui.selectable_value(&mut self.mode, Mode::Tech, Mode::Tech.label());
                         ui.selectable_value(&mut self.mode, Mode::Convo, Mode::Convo.label());
                     });
@@ -555,8 +572,9 @@ impl GuiApp {
                     }
                 }
 
-                ui.checkbox(&mut self.auto_run, "auto-run")
-                    .on_hover_text("run proposed commands without confirming (denylist still asks)");
+                ui.checkbox(&mut self.auto_run, "auto-run").on_hover_text(
+                    "run proposed commands without confirming (denylist still asks)",
+                );
 
                 ui.separator();
                 if ui.button("new").clicked() {
@@ -604,17 +622,23 @@ impl GuiApp {
                 });
                 ui.separator();
                 let entries = self.conversations.clone();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for (id, title, updated) in &entries {
-                        let date = updated.get(..10).unwrap_or(updated);
-                        let title = if title.is_empty() { "(untitled)" } else { title.as_str() };
-                        let selected = id == &self.conv.id.to_string();
-                        let label = format!("{date}\n{title}");
-                        if ui.selectable_label(selected, label).clicked() {
-                            self.load_conversation(id);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (id, title, updated) in &entries {
+                            let date = updated.get(..10).unwrap_or(updated);
+                            let title = if title.is_empty() {
+                                "(untitled)"
+                            } else {
+                                title.as_str()
+                            };
+                            let selected = id == &self.conv.id.to_string();
+                            let label = format!("{date}\n{title}");
+                            if ui.selectable_label(selected, label).clicked() {
+                                self.load_conversation(id);
+                            }
                         }
-                    }
-                });
+                    });
             });
     }
 
@@ -664,8 +688,16 @@ impl GuiApp {
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    if self.conv.messages.iter().all(|m| matches!(m.role, Role::System)) {
-                        ui.label(RichText::new("Start chatting — ask a question or request a command.").weak());
+                    if self
+                        .conv
+                        .messages
+                        .iter()
+                        .all(|m| matches!(m.role, Role::System))
+                    {
+                        ui.label(
+                            RichText::new("Start chatting — ask a question or request a command.")
+                                .weak(),
+                        );
                     }
                     let mut edit_request = None;
                     for (i, m) in self.conv.messages.iter().enumerate() {
@@ -697,7 +729,9 @@ impl GuiApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 if denied {
-                    ui.label(RichText::new("⚠ matches denylist — review carefully").color(Color32::RED));
+                    ui.label(
+                        RichText::new("⚠ matches denylist — review carefully").color(Color32::RED),
+                    );
                 }
                 if let Some(cmd) = self.pending_command.as_mut() {
                     ui.add(egui::TextEdit::multiline(cmd).desired_rows(2).code_editor());
@@ -733,7 +767,10 @@ impl GuiApp {
             .default_width(560.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(RichText::new("Type the corrected reply, or load the original to edit it.").weak());
+                ui.label(
+                    RichText::new("Type the corrected reply, or load the original to edit it.")
+                        .weak(),
+                );
                 ui.add(
                     egui::TextEdit::multiline(&mut self.edit_buf)
                         .desired_rows(10)
@@ -784,13 +821,15 @@ impl GuiApp {
                         ui.label("no models found");
                     }
                     Some(list) => {
-                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                            for m in list {
-                                if ui.selectable_label(m == &self.config.model, m).clicked() {
-                                    chosen = Some(m.clone());
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for m in list {
+                                    if ui.selectable_label(m == &self.config.model, m).clicked() {
+                                        chosen = Some(m.clone());
+                                    }
                                 }
-                            }
-                        });
+                            });
                     }
                 }
             });
@@ -816,25 +855,48 @@ impl GuiApp {
             .resizable(true)
             .default_width(620.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
-                    ui.label("Chat endpoint (base URL)");
-                    ui.add(egui::TextEdit::singleline(&mut self.config.base_url).desired_width(f32::INFINITY));
-                    ui.add_space(6.0);
-                    ui.add(egui::Slider::new(&mut self.config.generation.temperature, 0.0..=2.0).text("temperature"));
-                    ui.add_space(10.0);
+                egui::ScrollArea::vertical()
+                    .max_height(440.0)
+                    .show(ui, |ui| {
+                        ui.label("Chat endpoint (base URL)");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.config.base_url)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::Slider::new(&mut self.config.generation.temperature, 0.0..=2.0)
+                                .text("temperature"),
+                        );
+                        ui.add_space(10.0);
 
-                    ui.label(RichText::new("Assistant system prompt (runs commands)").strong());
-                    ui.add(egui::TextEdit::multiline(&mut self.config.system_prompt).desired_rows(4).desired_width(f32::INFINITY));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Tech-guy system prompt").strong());
-                    ui.add(egui::TextEdit::multiline(&mut self.config.tech_system_prompt).desired_rows(3).desired_width(f32::INFINITY));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Convo system prompt").strong());
-                    ui.add(egui::TextEdit::multiline(&mut self.config.convo_system_prompt).desired_rows(3).desired_width(f32::INFINITY));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Fine-tune MLX base").strong());
-                    ui.add(egui::TextEdit::singleline(&mut self.config.finetune.mlx_base).desired_width(f32::INFINITY));
-                });
+                        ui.label(RichText::new("Assistant system prompt (runs commands)").strong());
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.config.system_prompt)
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Tech-guy system prompt").strong());
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.config.tech_system_prompt)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Convo system prompt").strong());
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.config.convo_system_prompt)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Fine-tune MLX base").strong());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.config.finetune.mlx_base)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Save to config.toml").clicked() {
@@ -880,13 +942,20 @@ impl GuiApp {
             .resizable(true)
             .default_width(560.0)
             .show(ctx, |ui| {
-                ui.label(if self.busy == Busy::Training { "training in progress…" } else { "last run" });
-                ui.separator();
-                egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).show(ui, |ui| {
-                    for line in &self.train_log {
-                        ui.label(RichText::new(line).monospace().small());
-                    }
+                ui.label(if self.busy == Busy::Training {
+                    "training in progress…"
+                } else {
+                    "last run"
                 });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.train_log {
+                            ui.label(RichText::new(line).monospace().small());
+                        }
+                    });
             });
         if !open && self.busy != Busy::Training {
             self.train_log.clear();
@@ -965,9 +1034,7 @@ fn flush_segment(ui: &mut egui::Ui, buf: &str, code: bool) {
 }
 
 fn code_block(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::group(ui.style())
-        .fill(CODE_BG)
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(text).monospace()).wrap());
-        });
+    egui::Frame::group(ui.style()).fill(CODE_BG).show(ui, |ui| {
+        ui.add(egui::Label::new(RichText::new(text).monospace()).wrap());
+    });
 }

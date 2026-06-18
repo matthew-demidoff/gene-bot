@@ -203,7 +203,10 @@ fn partial_suffix_len(buf: &str, markers: &[&str]) -> usize {
             continue;
         }
         let suffix = &buf[idx..];
-        if markers.iter().any(|m| m.len() > len && m.starts_with(suffix)) {
+        if markers
+            .iter()
+            .any(|m| m.len() > len && m.starts_with(suffix))
+        {
             return len;
         }
     }
@@ -278,7 +281,10 @@ mod tests {
     fn chat_mode_keeps_run_block_as_text() {
         // In Chat mode, a ```run fence is ordinary text, not a tool call.
         let ev = drive_mode(&["try:\n```run\nls\n```\n"], false);
-        let calls = ev.iter().filter(|e| matches!(e, StreamEvent::ToolCall(_))).count();
+        let calls = ev
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolCall(_)))
+            .count();
         assert_eq!(calls, 0);
         assert!(answer(&ev).contains("```run"));
         assert!(answer(&ev).contains("ls"));

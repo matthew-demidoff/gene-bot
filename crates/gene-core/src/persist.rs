@@ -16,7 +16,8 @@ pub fn save_conversation(dir: &Path, conv: &Conversation) -> Result<()> {
     let tmp_path = dir.join(format!(".{}.json.tmp", conv.id));
     let json = serde_json::to_string_pretty(conv).context("serializing conversation")?;
     fs::write(&tmp_path, json).with_context(|| format!("writing {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, &final_path).with_context(|| format!("renaming to {}", final_path.display()))?;
+    fs::rename(&tmp_path, &final_path)
+        .with_context(|| format!("renaming to {}", final_path.display()))?;
     Ok(())
 }
 
@@ -24,7 +25,8 @@ pub fn save_conversation(dir: &Path, conv: &Conversation) -> Result<()> {
 pub fn load_conversation(dir: &Path, id: &str) -> Result<Conversation> {
     let path = dir.join(format!("{id}.json"));
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let conv = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let conv =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(conv)
 }
 
@@ -41,7 +43,11 @@ pub fn list_conversations(dir: &Path) -> Vec<(String, String, String)> {
         }
         if let Ok(text) = fs::read_to_string(&path) {
             if let Ok(conv) = serde_json::from_str::<Conversation>(&text) {
-                out.push((conv.id.to_string(), conv.title, conv.updated_at.to_rfc3339()));
+                out.push((
+                    conv.id.to_string(),
+                    conv.title,
+                    conv.updated_at.to_rfc3339(),
+                ));
             }
         }
     }

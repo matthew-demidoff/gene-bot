@@ -40,7 +40,9 @@ pub async fn run_stream(
     {
         Ok(r) => r,
         Err(e) => {
-            let _ = tx.send(StreamEvent::Error(format!("request failed: {e}"))).await;
+            let _ = tx
+                .send(StreamEvent::Error(format!("request failed: {e}")))
+                .await;
             return;
         }
     };
@@ -86,7 +88,9 @@ pub async fn run_stream(
                 }
             }
             Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("stream error: {e}"))).await;
+                let _ = tx
+                    .send(StreamEvent::Error(format!("stream error: {e}")))
+                    .await;
                 break;
             }
         }
