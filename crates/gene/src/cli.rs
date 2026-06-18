@@ -926,9 +926,21 @@ pub async fn setup(mut cfg: Config, cfg_path: &Path) -> Result<()> {
     }
 
     println!("\nSystem prompt (sent before every conversation; blank = none)");
+    // A failed/cancelled editor must not abort the wizard and discard everything
+    // already entered — warn and drop back to inline entry.
+    let mut have_prompt = false;
     if confirm("  edit in $EDITOR?", false)? {
-        cfg.system_prompt = edit_in_editor(&cfg.system_prompt)?;
-    } else {
+        match edit_in_editor(&cfg.system_prompt) {
+            Ok(text) => {
+                cfg.system_prompt = text;
+                have_prompt = true;
+            }
+            Err(e) => {
+                println!("  ! editor didn't return a saved file ({e}); enter the prompt inline:");
+            }
+        }
+    }
+    if !have_prompt {
         cfg.system_prompt = ask("  system prompt", &cfg.system_prompt)?;
     }
     cfg.agent.run_commands = confirm(
