@@ -3,10 +3,12 @@ resolver = "2"
 members = ["crates/gene-core", "crates/gene"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/matthew-demidoff/gene-bot"
+homepage = "https://github.com/matthew-demidoff/gene-bot"
+readme = "README.md"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }

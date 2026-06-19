@@ -60,6 +60,13 @@ llama.cpp GGUF path to get back into Ollama.
 
 ## Install
 
+Prebuilt binaries for each tagged release (desktop builds for macOS and Windows,
+a portable headless build for Linux) are attached to the
+[GitHub Releases](https://github.com/matthew-demidoff/gene-bot/releases), each
+with a `.sha256` to verify the download.
+
+Or build from source:
+
 ```sh
 cargo build --release                           # release binary (target/release/gene)
 cargo run -p gene-ai                            # launch the GUI (default `gui` feature)

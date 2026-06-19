@@ -22,6 +22,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The gene-core path dep carries a literal version that Cargo can't inherit
+      # from [workspace.package]; guard it so a version bump can't silently ship a
+      # stale dependency requirement to crates.io.
+      - name: gene-core dep version matches workspace version
+        run: |
+          ws=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)
+          dep=$(sed -nE 's/.*gene-core = \{.*version = "([^"]+)".*/\1/p' crates/gene/Cargo.toml)
+          echo "workspace=$ws gene-core dep=$dep"
+          if [ -z "$ws" ] || [ "$ws" != "$dep" ]; then
+            echo "::error::crates/gene gene-core dep version ($dep) != workspace version ($ws)"
+            exit 1
+          fi
       - name: Install egui build deps
         run: |
           sudo apt-get update

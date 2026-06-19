@@ -5,7 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 default-run = "gene"
+keywords = ["llm", "fine-tuning", "mlx", "ollama", "cli"]
+categories = ["command-line-utilities", "science"]
 
 [[bin]]
 name = "gene"
@@ -18,7 +22,9 @@ default = ["gui"]
 gui = ["dep:eframe", "dep:egui", "dep:egui_plot", "dep:toml", "dep:tracing", "dep:tracing-subscriber"]
 
 [dependencies]
-gene-core = { path = "../gene-core" }
+# The version must track the workspace version — `cargo publish` requires a
+# version on a path dependency (and uses it as the crates.io requirement).
+gene-core = { path = "../gene-core", version = "0.3.0" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
