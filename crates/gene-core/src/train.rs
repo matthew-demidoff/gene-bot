@@ -281,7 +281,17 @@ fn template_vars(
 fn fill(template: &str, vars: &[(&str, String)]) -> String {
     let mut s = template.to_string();
     for (k, v) in vars {
-        s = s.replace(&format!("{{{k}}}"), v);
+        // The filled command is re-split with `shell_words::split` before exec, so
+        // each value must be shell-quoted or a path with a space (e.g. the macOS
+        // "Application Support" data dir) splits into stray arguments. `extra_args`
+        // is the deliberate exception: it's a multi-argument escape hatch and must
+        // pass through verbatim. Quoting is a no-op for space-free values.
+        let replacement = if *k == "extra_args" {
+            v.clone()
+        } else {
+            shell_words::quote(v).into_owned()
+        };
+        s = s.replace(&format!("{{{k}}}"), &replacement);
     }
     s
 }
@@ -638,5 +648,33 @@ mod tests {
         let labels: Vec<_> = cmds.iter().map(|(l, _)| l.as_str()).collect();
         assert!(!labels.contains(&"fuse")); // full skips fuse
         assert!(cmds[0].1.contains("--fine-tune-type full"));
+    }
+
+    #[test]
+    fn fill_quotes_paths_with_spaces_but_not_extra_args() {
+        // The macOS default data dir lives under "Application Support" — a path
+        // with a space. After fill + the shell_words::split that run_cmd does, it
+        // must come back as ONE argument, while extra_args stays multi-token.
+        let vars = vec![
+            (
+                "data",
+                "/Users/me/Application Support/gene/data".to_string(),
+            ),
+            ("extra_args", "--optimizer adamw --seed 7".to_string()),
+        ];
+        let parts = shell_words::split(&fill("lora --data {data} {extra_args}", &vars)).unwrap();
+        assert!(parts.contains(&"/Users/me/Application Support/gene/data".to_string()));
+        assert!(parts.contains(&"--optimizer".to_string()));
+        assert!(parts.contains(&"adamw".to_string()));
+        assert!(parts.contains(&"7".to_string()));
+
+        // A placeholder embedded mid-token (e.g. {fused}/model.gguf) rejoins into
+        // a single argument too.
+        let embedded = shell_words::split(&fill(
+            "convert {fused}/model.gguf",
+            &[("fused", "/a b/fused".to_string())],
+        ))
+        .unwrap();
+        assert!(embedded.contains(&"/a b/fused/model.gguf".to_string()));
     }
 }
