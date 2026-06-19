@@ -1,0 +1,11 @@
+{
+  "name": "capitals",
+  "system_prompt": "Answer with only the city name, nothing else.",
+  "temperature": 0,
+  "items": [
+    { "id": "france", "prompt": "What is the capital of France?", "reference": "Paris", "grader": "contains" },
+    { "id": "japan", "prompt": "What is the capital of Japan?", "reference": "Tokyo", "grader": "contains" },
+    { "id": "australia", "prompt": "What is the capital of Australia?", "reference": "Canberra", "grader": "exact" },
+    { "id": "explain-mmap", "prompt": "Explain mmap in one sentence.", "reference": "A correct, one-sentence explanation of memory-mapped files.", "grader": "judge" }
+  ]
+}

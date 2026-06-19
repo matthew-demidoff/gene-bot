@@ -1,0 +1,34 @@
+# Example: a multi-provider config.
+#
+# Drop the [providers] / [roles] blocks into your own config.toml (find it with
+# `gene config path`) to route chat, evaluation, and the LLM judge at different
+# backends. When [providers] is non-empty, the top-level model/base_url/api_key
+# fields are ignored — the named profiles win.
+
+# Local Ollama for day-to-day chat.
+[providers.local]
+kind     = "ollama"
+base_url = "http://localhost:11434/v1/chat/completions"
+api_key  = "ollama"
+model    = "huihui_ai/llama3.1-abliterated:latest"
+
+# A fine-tune you're serving with `mlx_lm.server` (or any OpenAI-compatible host).
+[providers.finetuned]
+kind     = "openai_compat"
+base_url = "http://localhost:8080/v1/chat/completions"
+api_key  = ""
+model    = "my-finetune"
+
+# A stronger hosted model to act as the eval judge. Keep real keys out of shared
+# files — set the key in your private config.toml, not here.
+[providers.judge]
+kind     = "openai_compat"
+base_url = "https://api.openai.com/v1/chat/completions"
+api_key  = "sk-..."
+model    = "gpt-4o-mini"
+
+# Which profile each activity uses.
+[roles]
+chat  = "local"
+eval  = "finetuned"
+judge = "judge"
